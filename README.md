@@ -60,7 +60,7 @@ Go to **Settings → Apps → Add** in the MA UI. You should see **"YouTube Musi
 
 ### Keeping the provider across HA restarts
 
-If you restart HA (not just MA), the container is recreated and the provider files are lost. To automate re-installation, create a local HA add-on that watches for MA container restarts and re-copies the files. See [the watcher add-on approach](https://www.home-assistant.io/developers/add-ons/tutorial/) for details.
+If you restart HA (not just MA), the container is recreated and the provider files are lost. To automate re-installation, see **[WATCHER_ADDON.md](WATCHER_ADDON.md)** for a ready-to-use local HA add-on that watches for MA container restarts and re-copies the files automatically.
 
 ---
 
@@ -106,7 +106,7 @@ If you restart HA (not just MA), the container is recreated and the provider fil
 
 **Files disappear after restarting Home Assistant**
 - Only use `docker restart addon_d5369777_music_assistant` to restart MA.
-- Restarting HA from the UI recreates the container from scratch. Set up the watcher add-on to automate re-copying.
+- Restarting HA from the UI recreates the container from scratch. See [WATCHER_ADDON.md](WATCHER_ADDON.md) to set up automatic re-copying.
 
 ---
 
