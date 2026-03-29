@@ -1,0 +1,14 @@
+{
+  "type": "music",
+  "domain": "ytmusic_free",
+  "stage": "experimental",
+  "name": "YouTube Music (Free)",
+  "description": "Stream YouTube Music without a premium subscription. Uses yt-dlp for audio extraction.",
+  "codeowners": [],
+  "requirements": [
+    "ytmusicapi>=1.7.0",
+    "yt-dlp[default]>=2024.1.0",
+    "duration-parser>=1.0.1"
+  ],
+  "multi_instance": false
+}
