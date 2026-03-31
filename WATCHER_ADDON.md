@@ -64,7 +64,7 @@ RUN chmod +x /etc/services.d/ma-watcher/run
 ## run.sh
 
 ```bash
-#!/usr/bin/with-contenv bash
+#!/usr/bin/env bash
 
 MA="addon_d5369777_music_assistant"
 SRC="/config/custom_components/mass/providers/ytmusic_free"
@@ -120,7 +120,8 @@ Check the add-on logs — you should see it start without errors. On the next HA
 ## Troubleshooting
 
 **Add-on won't start / `s6-overlay-suexec: fatal: can only run as pid 1`**
-- Make sure `run.sh` is placed at `/etc/services.d/ma-watcher/run` (handled by the Dockerfile above), not set as `CMD`. The HA base image uses s6-overlay as PID 1 and services must be registered this way.
+- Newer HA base images use s6-overlay v3, which broke the `#!/usr/bin/with-contenv bash` shebang. Change the first line of `run.sh` to `#!/usr/bin/env bash` — the environment is already injected by the s6 service runner in v3.
+- Also make sure `run.sh` is placed at `/etc/services.d/ma-watcher/run` (handled by the Dockerfile above), not set as `CMD`.
 
 **Provider still missing after HA restart**
 - Confirm the source path `/config/custom_components/mass/providers/ytmusic_free` exists and contains both files.
