@@ -1,8 +1,11 @@
 """YouTube Music (Free) provider for Music Assistant.
 
 Streams YouTube Music without a premium subscription by:
-- Using ytmusicapi without authentication for search/metadata
+- Using ytmusicapi for search/metadata (optionally with browser cookie auth)
 - Using yt-dlp with the iOS client to extract stream URLs (no PO token needed)
+
+Authentication is optional. Without it, search/browse/playback work fine.
+With browser cookie authentication, library sync and recommendations unlock.
 
 Note: This uses YouTube's internal APIs in an unofficial manner, similar to how
 apps like SimpMusic work. This may break if YouTube changes their API.
@@ -20,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from duration_parser import parse as parse_str_duration
-from music_assistant_models.config_entries import ConfigEntry, ConfigValueType
+from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption, ConfigValueType
 from music_assistant_models.enums import (
     AlbumType,
     ConfigEntryType,
@@ -66,8 +69,8 @@ YTM_DOMAIN = "https://music.youtube.com"
 VARIOUS_ARTISTS_YTM_ID = "UCUTXlgdcKU5vfzFqHOWIvkA"
 DEFAULT_STREAM_URL_EXPIRATION = 3600  # 1 hour
 
-# Only features that work without a YTM account
-SUPPORTED_FEATURES = {
+# Features that work without a YTM account
+BASE_FEATURES = {
     ProviderFeature.SEARCH,
     ProviderFeature.ARTIST_ALBUMS,
     ProviderFeature.ARTIST_TOPTRACKS,
@@ -75,14 +78,30 @@ SUPPORTED_FEATURES = {
     ProviderFeature.BROWSE,
 }
 
+# Additional features unlocked by browser cookie authentication
+AUTHENTICATED_FEATURES = {
+    ProviderFeature.LIBRARY_ARTISTS,
+    ProviderFeature.LIBRARY_ALBUMS,
+    ProviderFeature.LIBRARY_TRACKS,
+    ProviderFeature.LIBRARY_PLAYLISTS,
+    ProviderFeature.RECOMMENDATIONS,
+    ProviderFeature.LIBRARY_ARTISTS_EDIT,
+    ProviderFeature.LIBRARY_ALBUMS_EDIT,
+    ProviderFeature.LIBRARY_PLAYLISTS_EDIT,
+}
+
+CONF_AUTH_TYPE = "auth_type"
+CONF_COOKIE = "cookie_header"
 CONF_PREFER_AUDIO_QUALITY = "prefer_audio_quality"
+AUTH_TYPE_NONE = "none"
+AUTH_TYPE_COOKIE = "cookie"
 
 
 async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Initialize provider(instance) with given configuration."""
-    return YoutubeMusicFreeProvider(mass, manifest, config, SUPPORTED_FEATURES)
+    return YoutubeMusicFreeProvider(mass, manifest, config, BASE_FEATURES)
 
 
 async def get_config_entries(
@@ -91,8 +110,33 @@ async def get_config_entries(
     action: str | None = None,  # noqa: ARG001
     values: dict[str, ConfigValueType] | None = None,  # noqa: ARG001
 ) -> tuple[ConfigEntry, ...]:
-    """Return Config entries to setup this provider. No credentials needed."""
+    """Return Config entries to setup this provider."""
     return (
+        ConfigEntry(
+            key=CONF_AUTH_TYPE,
+            type=ConfigEntryType.STRING,
+            label="Authentication",
+            default_value=AUTH_TYPE_NONE,
+            required=False,
+            options=(
+                ConfigValueOption(title="None (anonymous)", value=AUTH_TYPE_NONE),
+                ConfigValueOption(title="Browser cookie", value=AUTH_TYPE_COOKIE),
+            ),
+            description="Optional: authenticate with a browser cookie to unlock "
+            "library sync and recommendations. Leave as 'None' for anonymous access.",
+        ),
+        ConfigEntry(
+            key=CONF_COOKIE,
+            type=ConfigEntryType.SECURE_STRING,
+            label="Cookie header",
+            default_value="",
+            required=False,
+            depends_on=CONF_AUTH_TYPE,
+            depends_on_value=[AUTH_TYPE_COOKIE],
+            description="Paste your YouTube Music cookie from browser DevTools. "
+            "Open music.youtube.com → DevTools → Network → copy the 'Cookie' header "
+            "from any request. Must contain __Secure-3PAPISID.",
+        ),
         ConfigEntry(
             key=CONF_PREFER_AUDIO_QUALITY,
             type=ConfigEntryType.BOOLEAN,
@@ -111,20 +155,90 @@ class YoutubeMusicFreeProvider(MusicProvider):
     _ytmusic = None
     _yt_dlp_module = None
     _prefer_quality: bool = True
+    _authenticated: bool = False
 
     async def handle_async_init(self) -> None:
         """Set up the YTMusicFree provider."""
         logging.getLogger("yt_dlp").setLevel(logging.WARNING)
         await self._install_packages()
         self._prefer_quality = self.config.get_value(CONF_PREFER_AUDIO_QUALITY) or True
-        # Initialize ytmusicapi without authentication (read-only, public content only)
-        self._ytmusic = await asyncio.to_thread(self._create_ytmusic_client)
-        self.logger.info("YouTube Music (Free) provider initialized — no login required")
 
-    def _create_ytmusic_client(self):
-        """Create a YTMusic client without authentication."""
+        auth_type = self.config.get_value(CONF_AUTH_TYPE) or AUTH_TYPE_NONE
+        if auth_type == AUTH_TYPE_COOKIE:
+            cookie = self.config.get_value(CONF_COOKIE) or ""
+            if cookie:
+                try:
+                    headers = self._build_auth_headers(cookie)
+                    self._ytmusic = await asyncio.to_thread(
+                        self._create_ytmusic_client, auth=headers
+                    )
+                    # Validate auth by making a lightweight library call
+                    await asyncio.to_thread(self._ytmusic.get_library_songs, limit=1)
+                    self._authenticated = True
+                    self._supported_features.update(AUTHENTICATED_FEATURES)
+                    self.logger.info(
+                        "YouTube Music (Free) initialized with cookie authentication — "
+                        "library sync enabled"
+                    )
+                except Exception as err:
+                    self.logger.warning(
+                        "Cookie authentication failed (%s), falling back to anonymous mode. "
+                        "You may need to refresh your cookie.",
+                        err,
+                    )
+                    self._authenticated = False
+                    self._ytmusic = await asyncio.to_thread(self._create_ytmusic_client)
+            else:
+                self._ytmusic = await asyncio.to_thread(self._create_ytmusic_client)
+        else:
+            self._ytmusic = await asyncio.to_thread(self._create_ytmusic_client)
+
+        if not self._authenticated:
+            self.logger.info("YouTube Music (Free) initialized — anonymous mode")
+
+    def _create_ytmusic_client(self, auth: dict | str | None = None):
+        """Create a YTMusic client, optionally with authentication."""
         ytmusicapi = importlib.import_module("ytmusicapi")
+        if auth:
+            return ytmusicapi.YTMusic(auth=auth)
         return ytmusicapi.YTMusic()
+
+    def _build_auth_headers(self, cookie: str) -> dict[str, str]:
+        """Build the auth headers dict that ytmusicapi expects from a raw cookie string."""
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Content-Type": "application/json",
+            "X-Goog-AuthUser": "0",
+            "x-origin": YTM_DOMAIN,
+            "Cookie": cookie,
+        }
+        # ytmusicapi needs the SAPISID-based Authorization header
+        if "__Secure-3PAPISID" not in cookie:
+            raise ValueError("Cookie must contain __Secure-3PAPISID")
+        # Extract SAPISID from cookie for Authorization header
+        for part in cookie.split(";"):
+            part = part.strip()
+            if part.startswith("SAPISID="):
+                sapisid = part.split("=", 1)[1]
+                break
+            if part.startswith("__Secure-3PAPISID="):
+                sapisid = part.split("=", 1)[1]
+                break
+        else:
+            raise ValueError("Could not extract SAPISID from cookie")
+        import hashlib
+
+        origin = YTM_DOMAIN
+        timestamp = str(int(time.time()))
+        hash_input = f"{timestamp} {sapisid} {origin}"
+        sapisid_hash = hashlib.sha1(hash_input.encode()).hexdigest()
+        headers["Authorization"] = f"SAPISIDHASH {timestamp}_{sapisid_hash}"
+        return headers
 
     async def search(
         self,
@@ -477,6 +591,128 @@ class YoutubeMusicFreeProvider(MusicProvider):
             with suppress(ValueError, TypeError):
                 stream_details.audio_format.sample_rate = int(sample_rate)
         return stream_details
+
+    # ------------------------------------------------------------------
+    # Library methods (require authentication)
+    # ------------------------------------------------------------------
+
+    async def get_library_artists(self) -> AsyncGenerator[Artist, None]:
+        """Get artists from the user's library."""
+        if not self._authenticated:
+            return
+        try:
+            results = await asyncio.to_thread(
+                self._ytmusic.get_library_subscriptions, limit=9999
+            )
+        except Exception as err:
+            self.logger.warning("get_library_subscriptions failed: %s", err)
+            return
+        for item in results:
+            with suppress(InvalidDataError, KeyError, TypeError):
+                item.setdefault("channelId", item.get("browseId"))
+                yield self._parse_artist(item)
+
+    async def get_library_albums(self) -> AsyncGenerator[Album, None]:
+        """Get albums from the user's library."""
+        if not self._authenticated:
+            return
+        try:
+            results = await asyncio.to_thread(
+                self._ytmusic.get_library_albums, limit=9999
+            )
+        except Exception as err:
+            self.logger.warning("get_library_albums failed: %s", err)
+            return
+        for item in results:
+            with suppress(InvalidDataError, KeyError, TypeError):
+                yield self._parse_album(item, item.get("browseId"))
+
+    async def get_library_tracks(self) -> AsyncGenerator[Track, None]:
+        """Get tracks from the user's library."""
+        if not self._authenticated:
+            return
+        try:
+            results = await asyncio.to_thread(
+                self._ytmusic.get_library_songs, limit=9999
+            )
+        except Exception as err:
+            self.logger.warning("get_library_songs failed: %s", err)
+            return
+        for item in results:
+            with suppress(InvalidDataError, KeyError, TypeError):
+                track = self._parse_track(item)
+                if track:
+                    yield track
+
+    async def get_library_playlists(self) -> AsyncGenerator[Playlist, None]:
+        """Get playlists from the user's library."""
+        if not self._authenticated:
+            return
+        try:
+            results = await asyncio.to_thread(
+                self._ytmusic.get_library_playlists, limit=9999
+            )
+        except Exception as err:
+            self.logger.warning("get_library_playlists failed: %s", err)
+            return
+        for item in results:
+            with suppress(InvalidDataError, KeyError, TypeError):
+                item.setdefault("id", item.get("playlistId"))
+                yield self._parse_playlist(item)
+
+    async def library_add(self, item: MediaItemType) -> bool:
+        """Add an item to the user's library."""
+        if not self._authenticated:
+            return False
+        prov_mapping = next(
+            (m for m in item.provider_mappings if m.provider_instance == self.instance_id),
+            None,
+        )
+        if not prov_mapping:
+            return False
+        item_id = prov_mapping.item_id
+        try:
+            if item.media_type == MediaType.ARTIST:
+                await asyncio.to_thread(self._ytmusic.subscribe_artists, [item_id])
+            elif item.media_type == MediaType.ALBUM:
+                await asyncio.to_thread(self._ytmusic.rate_playlist, item_id, "LIKE")
+            elif item.media_type == MediaType.PLAYLIST:
+                await asyncio.to_thread(self._ytmusic.rate_playlist, item_id, "LIKE")
+            else:
+                return False
+            return True
+        except Exception as err:
+            self.logger.warning("library_add failed for %s: %s", item_id, err)
+            return False
+
+    async def library_remove(self, prov_item_id: str, media_type: MediaType) -> bool:
+        """Remove an item from the user's library."""
+        if not self._authenticated:
+            return False
+        try:
+            if media_type == MediaType.ARTIST:
+                await asyncio.to_thread(self._ytmusic.unsubscribe_artists, [prov_item_id])
+            elif media_type in (MediaType.ALBUM, MediaType.PLAYLIST):
+                await asyncio.to_thread(
+                    self._ytmusic.rate_playlist, prov_item_id, "INDIFFERENT"
+                )
+            else:
+                return False
+            return True
+        except Exception as err:
+            self.logger.warning("library_remove failed for %s: %s", prov_item_id, err)
+            return False
+
+    async def recommendations(self) -> list[str]:
+        """Get personalized recommendation section names for browse."""
+        if not self._authenticated:
+            return []
+        try:
+            home = await asyncio.to_thread(self._ytmusic.get_home, limit=6)
+        except Exception as err:
+            self.logger.warning("get_home failed: %s", err)
+            return []
+        return [section.get("title", "Recommendations") for section in home if section.get("title")]
 
     # ------------------------------------------------------------------
     # Internal helpers

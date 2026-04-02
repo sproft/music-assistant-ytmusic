@@ -3,7 +3,7 @@
   "domain": "ytmusic_free",
   "stage": "experimental",
   "name": "YouTube Music (Free)",
-  "description": "Stream YouTube Music without a premium subscription. Uses yt-dlp for audio extraction.",
+  "description": "Stream YouTube Music without a premium subscription. Uses yt-dlp for audio extraction. Optional browser cookie auth unlocks library sync and recommendations.",
   "codeowners": [],
   "requirements": [
     "ytmusicapi>=1.7.0",
