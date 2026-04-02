@@ -84,7 +84,6 @@ AUTHENTICATED_FEATURES = {
     ProviderFeature.LIBRARY_ALBUMS,
     ProviderFeature.LIBRARY_TRACKS,
     ProviderFeature.LIBRARY_PLAYLISTS,
-    ProviderFeature.RECOMMENDATIONS,
     ProviderFeature.LIBRARY_ARTISTS_EDIT,
     ProviderFeature.LIBRARY_ALBUMS_EDIT,
     ProviderFeature.LIBRARY_PLAYLISTS_EDIT,
@@ -101,7 +100,8 @@ async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Initialize provider(instance) with given configuration."""
-    return YoutubeMusicFreeProvider(mass, manifest, config, BASE_FEATURES)
+    # Declare all features upfront — library methods return empty when not authenticated
+    return YoutubeMusicFreeProvider(mass, manifest, config, BASE_FEATURES | AUTHENTICATED_FEATURES)
 
 
 async def get_config_entries(
@@ -175,7 +175,6 @@ class YoutubeMusicFreeProvider(MusicProvider):
                     # Validate auth by making a lightweight library call
                     await asyncio.to_thread(self._ytmusic.get_library_songs, limit=1)
                     self._authenticated = True
-                    self._supported_features.update(AUTHENTICATED_FEATURES)
                     self.logger.info(
                         "YouTube Music (Free) initialized with cookie authentication — "
                         "library sync enabled"
@@ -702,17 +701,6 @@ class YoutubeMusicFreeProvider(MusicProvider):
         except Exception as err:
             self.logger.warning("library_remove failed for %s: %s", prov_item_id, err)
             return False
-
-    async def recommendations(self) -> list[str]:
-        """Get personalized recommendation section names for browse."""
-        if not self._authenticated:
-            return []
-        try:
-            home = await asyncio.to_thread(self._ytmusic.get_home, limit=6)
-        except Exception as err:
-            self.logger.warning("get_home failed: %s", err)
-            return []
-        return [section.get("title", "Recommendations") for section in home if section.get("title")]
 
     # ------------------------------------------------------------------
     # Internal helpers
