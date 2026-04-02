@@ -634,6 +634,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
         for item in results:
             with suppress(InvalidDataError, KeyError, TypeError):
                 item.setdefault("channelId", item.get("browseId"))
+                item.setdefault("name", item.get("artist"))
                 yield self._parse_artist(item)
 
     async def get_library_albums(self) -> AsyncGenerator[Album, None]:
