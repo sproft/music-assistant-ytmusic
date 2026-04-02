@@ -6,7 +6,9 @@ When Home Assistant restarts, the Supervisor recreates the MA container from its
 
 ## How it works
 
-The add-on polls the MA container ID every 10 seconds. When the Supervisor recreates the MA container (new ID), the watcher copies the provider files into the new container and restarts MA. It also installs the provider immediately on first startup.
+The add-on polls the MA container ID every 10 seconds. When the Supervisor recreates the MA container (new ID), the watcher copies the provider files into the new container and restarts MA so it picks up the fresh files. On first startup, the watcher also installs the provider immediately if MA is already running.
+
+The provider files are baked into the watcher image at build time, so there is no dependency on `/config` volume mapping at runtime.
 
 ---
 
@@ -16,7 +18,10 @@ The add-on polls the MA container ID every 10 seconds. When the Supervisor recre
 /mnt/data/supervisor/addons/local/ma_provider_watcher/
 ├── config.yaml
 ├── Dockerfile
-└── run.sh
+├── run.sh
+└── ytmusic_free/
+    ├── __init__.py
+    └── manifest.json
 ```
 
 ---
@@ -31,13 +36,25 @@ slug: ma_provider_watcher
 init: false
 boot: auto
 docker_api: true
-image: ""
 arch:
   - aarch64
   - amd64
   - armhf
   - armv7
   - i386
+```
+
+---
+
+## build.yaml
+
+```yaml
+build_from:
+  aarch64: ghcr.io/home-assistant/aarch64-base:latest
+  amd64: ghcr.io/home-assistant/amd64-base:latest
+  armhf: ghcr.io/home-assistant/armhf-base:latest
+  armv7: ghcr.io/home-assistant/armv7-base:latest
+  i386: ghcr.io/home-assistant/i386-base:latest
 ```
 
 ---
@@ -49,6 +66,8 @@ ARG BUILD_FROM
 FROM $BUILD_FROM
 
 RUN apk add --no-cache docker-cli bash
+
+COPY ytmusic_free/ /provider/ytmusic_free/
 
 COPY run.sh /run.sh
 RUN chmod +x /run.sh && sed -i 's/\r//' /run.sh
@@ -64,7 +83,7 @@ ENTRYPOINT ["/run.sh"]
 #!/usr/bin/env bash
 
 MA="addon_d5369777_music_assistant"
-SRC="/config/custom_components/mass/providers/ytmusic_free"
+SRC="/provider/ytmusic_free"
 DST="/app/venv/lib/python3.13/site-packages/music_assistant/providers"
 
 echo "[$(date)] MA Provider Watcher starting..."
@@ -116,30 +135,38 @@ done
 
 ## Installation
 
-### 1. Place the provider files in `/config`
+### 1. Create the add-on directory
 
+Open the Terminal add-on and create the directory structure:
+
+```bash
+mkdir -p /mnt/data/supervisor/addons/local/ma_provider_watcher
 ```
-/config/custom_components/mass/providers/
-└── ytmusic_free/
-    ├── __init__.py
-    └── manifest.json
+
+### 2. Copy the provider files
+
+Copy the `ytmusic_free` provider folder into the add-on directory:
+
+```bash
+cp -r /path/to/ytmusic_free /mnt/data/supervisor/addons/local/ma_provider_watcher/ytmusic_free
 ```
 
-### 2. Create the add-on files
+### 3. Create the add-on files
 
-Open the Terminal add-on and create the three files shown above under `/mnt/data/supervisor/addons/local/ma_provider_watcher/`.
+Create `config.yaml`, `build.yaml`, `Dockerfile`, and `run.sh` as shown above.
 
-### 3. Install the add-on
+### 4. Install the add-on
 
-**Settings → Add-ons → Add-on Store** (three-dot menu) → **Check for updates**. The **MA Provider Watcher** appears under **Local add-ons**. Click → **Install**.
+In Home Assistant: **Settings → Add-ons → Add-on Store** (three-dot menu) → **Check for updates**. The **MA Provider Watcher** appears under **Local add-ons**. Click → **Install**.
 
-### 4. Disable Protection Mode
+### 5. Disable Protection Mode
 
 Go to the add-on's **Info** tab and turn **Protection mode OFF**. This is required — without it, the Docker socket is not mounted and the add-on cannot manage MA containers.
 
-### 5. Start and verify
+### 6. Start and verify
 
 Start the add-on and check the logs. You should see:
+
 ```
 Docker OK
 MA running (...), installing provider...
@@ -150,12 +177,30 @@ Polling for MA container changes every 10s...
 
 ---
 
+## Updating the provider
+
+When you update the `ytmusic_free` provider code, copy the new files into the add-on directory and rebuild:
+
+```bash
+cp -r /path/to/ytmusic_free /mnt/data/supervisor/addons/local/ma_provider_watcher/ytmusic_free
+ha apps rebuild local_ma_provider_watcher
+ha apps restart local_ma_provider_watcher
+```
+
+---
+
 ## Troubleshooting
 
 **`ERROR: No Docker socket (is Protection Mode off?)`**
 - Turn **Protection mode OFF** in the add-on settings. This is the most common issue.
 
+**`lstat /provider: no such file or directory`**
+- The `ytmusic_free/` folder is missing from the add-on directory. Copy it and rebuild.
+
+**Add-on not found in store**
+- Ensure `config.yaml` and `build.yaml` are valid YAML. Check Supervisor logs: `ha supervisor logs | grep ma_provider`.
+- Run `ha supervisor reload` and wait 30 seconds.
+
 **Provider still missing after HA restart**
-- Confirm `/config/custom_components/mass/providers/ytmusic_free` exists with both files.
 - Check the watcher logs for `cp failed` or `restart failed` errors.
 - Confirm the MA container name matches `MA=` in `run.sh`.
