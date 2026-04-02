@@ -1,20 +1,16 @@
 # Provider Watcher Add-on
 
-When Home Assistant restarts (not just Music Assistant), the Supervisor recreates the MA container from its image — wiping any files you copied into it, including this provider. The watcher add-on solves this by automatically re-copying the provider files every time the MA container starts.
+When Home Assistant restarts, the Supervisor recreates the MA container from its image — wiping any files you copied into it, including this provider. The watcher add-on solves this by automatically re-copying the provider files whenever the MA container is recreated.
 
 ---
 
 ## How it works
 
-The add-on runs a loop inside the HA Supervisor Docker environment. It uses `docker events` to listen for MA container start events and, each time one fires, re-copies the provider folder into the new container and restarts MA so it picks up the fresh files.
-
-Because HA Supervisor recreates the container with a **new container ID**, the watcher can distinguish a Supervisor-triggered restart (new ID → re-copy needed) from its own `docker restart` call (same ID → skip to avoid a loop).
+The add-on polls the MA container ID every 10 seconds. When the Supervisor recreates the MA container (new ID), the watcher copies the provider files into the new container and restarts MA. It also installs the provider immediately on first startup.
 
 ---
 
 ## File layout
-
-Create the following folder structure on your HAOS host at:
 
 ```
 /mnt/data/supervisor/addons/local/ma_provider_watcher/
@@ -54,9 +50,10 @@ FROM $BUILD_FROM
 
 RUN apk add --no-cache docker-cli bash
 
-RUN mkdir -p /etc/services.d/ma-watcher
-COPY run.sh /etc/services.d/ma-watcher/run
-RUN chmod +x /etc/services.d/ma-watcher/run
+COPY run.sh /run.sh
+RUN chmod +x /run.sh && sed -i 's/\r//' /run.sh
+
+ENTRYPOINT ["/run.sh"]
 ```
 
 ---
@@ -69,15 +66,42 @@ RUN chmod +x /etc/services.d/ma-watcher/run
 MA="addon_d5369777_music_assistant"
 SRC="/config/custom_components/mass/providers/ytmusic_free"
 DST="/app/venv/lib/python3.13/site-packages/music_assistant/providers"
-LAST_ID=""
 
-docker events --filter event=start --filter name="$MA" --format "{{.ID}}" | while read id; do
-    SHORT="${id:0:12}"
-    if [ "$SHORT" != "$LAST_ID" ]; then
-        LAST_ID="$SHORT"
-        sleep 3
-        docker cp "$SRC" "$MA:$DST/"
-        docker restart "$MA"
+echo "[$(date)] MA Provider Watcher starting..."
+
+if ! docker info > /dev/null 2>&1; then
+    echo "[$(date)] ERROR: No Docker socket (is Protection Mode off?)"
+    sleep 300
+    exit 1
+fi
+echo "[$(date)] Docker OK"
+
+install_provider() {
+    echo "[$(date)] Installing ytmusic_free provider..."
+    sleep 3
+    docker cp "$SRC" "$MA:$DST/" && echo "[$(date)] Copied OK" || { echo "[$(date)] ERROR: cp failed"; return 1; }
+    docker restart "$MA" && echo "[$(date)] MA restarted" || echo "[$(date)] ERROR: restart failed"
+}
+
+LAST_ID=$(docker ps -q --no-trunc --filter name="$MA" 2>/dev/null)
+if [ -n "$LAST_ID" ]; then
+    echo "[$(date)] MA running (${LAST_ID:0:12}), installing provider..."
+    install_provider
+else
+    echo "[$(date)] MA not running, waiting..."
+fi
+
+echo "[$(date)] Polling for MA container changes every 10s..."
+while true; do
+    sleep 10
+    CUR_ID=$(docker ps -q --no-trunc --filter name="$MA" 2>/dev/null)
+    if [ -n "$CUR_ID" ] && [ "$CUR_ID" != "$LAST_ID" ]; then
+        echo "[$(date)] New MA container (${CUR_ID:0:12}), reinstalling..."
+        LAST_ID="$CUR_ID"
+        install_provider
+    elif [ -z "$CUR_ID" ] && [ -n "$LAST_ID" ]; then
+        echo "[$(date)] MA stopped"
+        LAST_ID=""
     fi
 done
 ```
@@ -94,8 +118,6 @@ done
 
 ### 1. Place the provider files in `/config`
 
-The watcher copies from `/config/custom_components/mass/providers/ytmusic_free`, so put the provider folder there:
-
 ```
 /config/custom_components/mass/providers/
 └── ytmusic_free/
@@ -105,25 +127,35 @@ The watcher copies from `/config/custom_components/mass/providers/ytmusic_free`,
 
 ### 2. Create the add-on files
 
-SSH into HAOS or open the Terminal add-on and create the three files shown above under `/mnt/data/supervisor/addons/local/ma_provider_watcher/`.
+Open the Terminal add-on and create the three files shown above under `/mnt/data/supervisor/addons/local/ma_provider_watcher/`.
 
-### 3. Build and start the add-on
+### 3. Install the add-on
 
-In Home Assistant go to **Settings → Add-ons → Add-on Store** (three-dot menu top right) → **Check for updates**. The **MA Provider Watcher** add-on will appear under **Local add-ons**. Click it → **Install** → **Start**.
+**Settings → Add-ons → Add-on Store** (three-dot menu) → **Check for updates**. The **MA Provider Watcher** appears under **Local add-ons**. Click → **Install**.
 
-### 4. Verify
+### 4. Disable Protection Mode
 
-Check the add-on logs — you should see it start without errors. On the next HA restart, the provider will be automatically re-copied and MA will reload with it in place.
+Go to the add-on's **Info** tab and turn **Protection mode OFF**. This is required — without it, the Docker socket is not mounted and the add-on cannot manage MA containers.
+
+### 5. Start and verify
+
+Start the add-on and check the logs. You should see:
+```
+Docker OK
+MA running (...), installing provider...
+Copied OK
+MA restarted
+Polling for MA container changes every 10s...
+```
 
 ---
 
 ## Troubleshooting
 
-**Add-on won't start / `s6-overlay-suexec: fatal: can only run as pid 1`**
-- Newer HA base images use s6-overlay v3, which broke the `#!/usr/bin/with-contenv bash` shebang. Change the first line of `run.sh` to `#!/usr/bin/env bash` — the environment is already injected by the s6 service runner in v3.
-- Also make sure `run.sh` is placed at `/etc/services.d/ma-watcher/run` (handled by the Dockerfile above), not set as `CMD`.
+**`ERROR: No Docker socket (is Protection Mode off?)`**
+- Turn **Protection mode OFF** in the add-on settings. This is the most common issue.
 
 **Provider still missing after HA restart**
-- Confirm the source path `/config/custom_components/mass/providers/ytmusic_free` exists and contains both files.
-- Check the watcher add-on logs for `docker cp` errors.
-- Confirm the MA container name matches the `MA=` variable in `run.sh`.
+- Confirm `/config/custom_components/mass/providers/ytmusic_free` exists with both files.
+- Check the watcher logs for `cp failed` or `restart failed` errors.
+- Confirm the MA container name matches `MA=` in `run.sh`.
