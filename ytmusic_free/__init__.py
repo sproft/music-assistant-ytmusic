@@ -619,23 +619,41 @@ class YoutubeMusicFreeProvider(MusicProvider):
     # ------------------------------------------------------------------
 
     async def get_library_artists(self) -> AsyncGenerator[Artist, None]:
-        """Get artists from the user's library."""
+        """Get artists from the user's library (subscriptions + library artists)."""
 
         if not self._authenticated:
             return
+        seen_ids: set[str] = set()
+        # Subscriptions first (explicitly followed artists)
         try:
-            results = await asyncio.to_thread(
+            subs = await asyncio.to_thread(
+                self._ytmusic.get_library_subscriptions, limit=9999
+            )
+            for item in subs:
+                with suppress(InvalidDataError, KeyError, TypeError):
+                    item.setdefault("channelId", item.get("browseId"))
+                    item.setdefault("name", item.get("artist"))
+                    artist = self._parse_artist(item)
+                    if artist.item_id not in seen_ids:
+                        seen_ids.add(artist.item_id)
+                        yield artist
+        except Exception as err:
+            self.logger.warning("get_library_subscriptions failed: %s", err)
+        # Then library artists (from liked songs) — skip duplicates
+        try:
+            lib_artists = await asyncio.to_thread(
                 self._ytmusic.get_library_artists, limit=9999
             )
-
+            for item in lib_artists:
+                with suppress(InvalidDataError, KeyError, TypeError):
+                    item.setdefault("channelId", item.get("browseId"))
+                    item.setdefault("name", item.get("artist"))
+                    artist = self._parse_artist(item)
+                    if artist.item_id not in seen_ids:
+                        seen_ids.add(artist.item_id)
+                        yield artist
         except Exception as err:
             self.logger.warning("get_library_artists failed: %s", err)
-            return
-        for item in results:
-            with suppress(InvalidDataError, KeyError, TypeError):
-                item.setdefault("channelId", item.get("browseId"))
-                item.setdefault("name", item.get("artist"))
-                yield self._parse_artist(item)
 
     async def get_library_albums(self) -> AsyncGenerator[Album, None]:
         """Get albums from the user's library."""
