@@ -48,6 +48,7 @@ from music_assistant_models.media_items import (
     MediaType,
     Playlist,
     ProviderMapping,
+    RecommendationFolder,
     SearchResults,
     Track,
     UniqueList,
@@ -84,6 +85,7 @@ AUTHENTICATED_FEATURES = {
     ProviderFeature.LIBRARY_ALBUMS,
     ProviderFeature.LIBRARY_TRACKS,
     ProviderFeature.LIBRARY_PLAYLISTS,
+    ProviderFeature.RECOMMENDATIONS,
     ProviderFeature.LIBRARY_ARTISTS_EDIT,
     ProviderFeature.LIBRARY_ALBUMS_EDIT,
     ProviderFeature.LIBRARY_PLAYLISTS_EDIT,
@@ -730,6 +732,50 @@ class YoutubeMusicFreeProvider(MusicProvider):
         except Exception as err:
             self.logger.warning("library_remove failed for %s: %s", prov_item_id, err)
             return False
+
+    async def recommendations(self) -> list[RecommendationFolder]:
+        """Get personalized recommendations from YouTube Music home feed."""
+        if not self._authenticated:
+            return []
+        try:
+            home = await asyncio.to_thread(self._ytmusic.get_home, limit=6)
+        except Exception as err:
+            self.logger.warning("get_home failed: %s", err)
+            return []
+        folders: list[RecommendationFolder] = []
+        for section in home:
+            title = section.get("title", "Recommendations")
+            items: list[MediaItemType | ItemMapping] = []
+            for content in section.get("contents", []):
+                with suppress(InvalidDataError, KeyError, TypeError):
+                    if video_id := content.get("videoId"):
+                        track = self._parse_track(content)
+                        if track:
+                            items.append(track)
+                    elif browse_id := content.get("browseId"):
+                        if content.get("subscribers") or content.get("type") == "artist":
+                            items.append(self._get_item_mapping(
+                                MediaType.ARTIST, browse_id, content.get("title", "")
+                            ))
+                        elif content.get("type") in ("album", "single", "ep"):
+                            items.append(self._get_item_mapping(
+                                MediaType.ALBUM, browse_id, content.get("title", "")
+                            ))
+                        elif content.get("playlistId") or "playlist" in content.get("type", ""):
+                            items.append(self._get_item_mapping(
+                                MediaType.PLAYLIST,
+                                content.get("playlistId", browse_id),
+                                content.get("title", ""),
+                            ))
+            if items:
+                folder = RecommendationFolder(
+                    item_id=f"ytm_rec_{title.lower().replace(' ', '_')}",
+                    provider=self.instance_id,
+                    name=title,
+                    items=UniqueList(items),
+                )
+                folders.append(folder)
+        return folders
 
     # ------------------------------------------------------------------
     # Internal helpers
