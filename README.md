@@ -6,7 +6,7 @@ A custom Music Assistant provider that streams YouTube Music **without a premium
 
 | Component | Role |
 |-----------|------|
-| `ytmusicapi` (no auth) | Search tracks, albums, artists, playlists |
+| `ytmusicapi` | Search, metadata, and library sync (optional auth) |
 | `yt-dlp` (android_music client) | Extract direct audio stream URLs and playlist tracks |
 
 YouTube's Android Music client API does not require a PO token or login session, so audio streams can be resolved for free-tier content. This is the same method used by NewPipe and SimpMusic on Android.
@@ -56,7 +56,7 @@ docker restart addon_d5369777_music_assistant
 
 ### 4. Add the provider in MA
 
-Go to **Settings → Apps → Add** in the MA UI. You should see **"YouTube Music (Free)"** listed. No credentials are required.
+Go to **Settings → Apps → Add** in the MA UI. You should see **"YouTube Music (Free)"** listed. No credentials are required for basic playback.
 
 ### Keeping the provider across HA restarts
 
@@ -64,20 +64,44 @@ If you restart HA (not just MA), the container is recreated and the provider fil
 
 ---
 
+## Authentication (optional)
+
+Authentication is **not required** for search, browse, and playback. However, adding a browser cookie unlocks:
+
+- Library sync (liked songs, saved albums, playlists, subscribed artists)
+- Personalized recommendations (home feed)
+- Library editing (add/remove items)
+
+### Setup
+
+1. In the MA UI, go to **Settings → Music sources → YouTube Music (Free)**
+2. Set **Authentication** to **Browser cookie**
+3. Get your cookie:
+   - Open `music.youtube.com` in your browser while logged in
+   - Open DevTools (F12) → **Network** tab → reload the page
+   - Click the first request → find the `Cookie:` header → copy the full value
+4. Paste the cookie into the **Cookie header** field
+5. **Brand accounts:** If your YouTube Music library is on a brand account, enter your brand account ID in the **Brand account ID** field. Find it at [myaccount.google.com/brandaccounts](https://myaccount.google.com/brandaccounts) or check the `X-Goog-PageId` header in DevTools.
+6. Click **Save**
+
+The cookie must contain `__Secure-3PAPISID`, `SID`, `HSID`, and `SSID`. Cookies are valid for approximately 2 years unless you log out.
+
+---
+
 ## Supported features
 
-| Feature | Supported |
-|---------|-----------|
-| Search (tracks, albums, artists, playlists) | ✅ |
-| Stream audio | ✅ |
-| Artist top tracks | ✅ |
-| Artist albums | ✅ |
-| Similar tracks (song radio) | ✅ |
-| Album tracks | ✅ |
-| Playlist tracks | ✅ (via yt-dlp fallback for unauthenticated sessions) |
-| Library sync (liked songs, subscriptions) | ❌ Requires login |
-| Recommendations / Home feed | ❌ Requires login |
-| Podcast support | ❌ Not implemented |
+| Feature | Without auth | With auth |
+|---------|:---:|:---:|
+| Search (tracks, albums, artists, playlists) | ✅ | ✅ |
+| Stream audio | ✅ | ✅ |
+| Artist top tracks / albums | ✅ | ✅ |
+| Similar tracks (song radio) | ✅ | ✅ |
+| Album / playlist tracks | ✅ | ✅ |
+| Library sync (songs, albums, playlists) | — | ✅ |
+| Library artists (subscriptions + liked) | — | ✅ |
+| Personalized recommendations | — | ✅ |
+| Library editing (add/remove) | — | ✅ |
+| Podcast support | ❌ | ❌ |
 
 ---
 
@@ -100,9 +124,14 @@ If you restart HA (not just MA), the container is recreated and the provider fil
 - Enable "Prefer highest audio quality" in the provider settings (on by default).
 - The android_music client typically provides 128–256 kbps AAC or Opus in an M4A/WebM container.
 
-**Search returns no results**
-- `ytmusicapi` occasionally has issues with certain query strings. Try a simpler query.
-- Confirm `ytmusicapi` installed correctly by checking MA logs on provider init.
+**Cookie authentication failed**
+- Make sure you copied the **entire** cookie string from the Network tab (2000+ characters).
+- The cookie must contain `__Secure-3PAPISID`, `SID`, `HSID`, and `SSID`.
+- If you use a brand account, enter the brand account ID (21-digit number from [myaccount.google.com/brandaccounts](https://myaccount.google.com/brandaccounts)).
+
+**Library is empty after auth**
+- Your YouTube Music library only shows content you've explicitly liked, saved, or subscribed to.
+- If your library is on a brand account, make sure the brand account ID is set.
 
 **Files disappear after restarting Home Assistant**
 - Only use `docker restart addon_d5369777_music_assistant` to restart MA.
