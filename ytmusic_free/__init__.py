@@ -316,10 +316,8 @@ class YoutubeMusicFreeProvider(MusicProvider):
 
     async def get_track(self, prov_track_id: str) -> Track:
         """Get full track details by id."""
-        self.logger.info("get_track called for %s", prov_track_id)
         try:
             track_obj = await asyncio.to_thread(self._ytmusic.get_song, prov_track_id)
-            self.logger.info("get_song returned keys: %s", list(track_obj.keys()) if track_obj else None)
             video_details = track_obj.get("videoDetails", {}) if track_obj else {}
             if video_details:
                 normalized = {
@@ -330,12 +328,9 @@ class YoutubeMusicFreeProvider(MusicProvider):
                     "thumbnails": video_details.get("thumbnail", {}).get("thumbnails", []),
                     "isAvailable": True,
                 }
-                track = self._parse_track(normalized)
-                self.logger.info("get_track returning parsed track: %s", track.name)
-                return track
+                return self._parse_track(normalized)
         except Exception as e:
-            self.logger.error("get_song exception for %s: %s", prov_track_id, e)
-        self.logger.info("get_track returning minimal track for %s", prov_track_id)
+            self.logger.debug("get_song failed for %s: %s", prov_track_id, e)
         return self._minimal_track(prov_track_id)
 
     async def get_album(self, prov_album_id: str) -> Album:
