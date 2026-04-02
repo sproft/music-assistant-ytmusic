@@ -625,11 +625,11 @@ class YoutubeMusicFreeProvider(MusicProvider):
             return
         try:
             results = await asyncio.to_thread(
-                self._ytmusic.get_library_subscriptions, limit=9999
+                self._ytmusic.get_library_artists, limit=9999
             )
 
         except Exception as err:
-            self.logger.warning("get_library_subscriptions failed: %s", err)
+            self.logger.warning("get_library_artists failed: %s", err)
             return
         for item in results:
             with suppress(InvalidDataError, KeyError, TypeError):
@@ -747,6 +747,8 @@ class YoutubeMusicFreeProvider(MusicProvider):
             title = section.get("title", "Recommendations")
             items: list[MediaItemType | ItemMapping] = []
             for content in section.get("contents", []):
+                if not content:
+                    continue
                 with suppress(InvalidDataError, KeyError, TypeError):
                     if video_id := content.get("videoId"):
                         track = self._parse_track(content)
