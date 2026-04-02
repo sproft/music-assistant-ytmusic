@@ -97,7 +97,6 @@ CONF_BRAND_ACCOUNT = "brand_account"
 CONF_PREFER_AUDIO_QUALITY = "prefer_audio_quality"
 AUTH_TYPE_NONE = "none"
 AUTH_TYPE_COOKIE = "cookie"
-ACTION_DETECT_ACCOUNTS = "detect_accounts"
 
 
 async def setup(
@@ -115,16 +114,6 @@ async def get_config_entries(
     values: dict[str, ConfigValueType] | None = None,
 ) -> tuple[ConfigEntry, ...]:
     """Return Config entries to setup this provider."""
-    # Detect brand accounts when the action button is clicked
-    account_options: list[ConfigValueOption] = [
-        ConfigValueOption(title="Default (personal account)", value=""),
-    ]
-    if action == ACTION_DETECT_ACCOUNTS and values:
-        cookie = values.get(CONF_COOKIE, "")
-        if cookie and "__Secure-3PAPISID" in str(cookie):
-            detected = await asyncio.to_thread(_detect_accounts, str(cookie))
-            account_options.extend(detected)
-
     return (
         ConfigEntry(
             key=CONF_AUTH_TYPE,
@@ -154,16 +143,14 @@ async def get_config_entries(
         ConfigEntry(
             key=CONF_BRAND_ACCOUNT,
             type=ConfigEntryType.STRING,
-            label="YouTube Music account",
+            label="Brand account ID (optional)",
             default_value="",
             required=False,
             depends_on=CONF_AUTH_TYPE,
             depends_on_value=[AUTH_TYPE_COOKIE],
-            options=tuple(account_options),
-            action=ACTION_DETECT_ACCOUNTS,
-            action_label="Detect accounts",
-            description="Select which account has your YouTube Music library. "
-            "Click 'Detect accounts' after entering your cookie.",
+            description="Leave empty for personal account. For brand accounts, "
+            "find your ID at myaccount.google.com/brandaccounts or check the "
+            "X-Goog-PageId header in browser DevTools on music.youtube.com.",
         ),
         ConfigEntry(
             key=CONF_PREFER_AUDIO_QUALITY,
@@ -175,63 +162,6 @@ async def get_config_entries(
             "Disable to use a more compatible but potentially lower-quality format.",
         ),
     )
-
-
-def _detect_accounts(cookie: str) -> list[ConfigValueOption]:
-    """Test different account IDs and return ones that have YouTube Music content."""
-    import hashlib
-    import json
-    import tempfile
-
-    ytmusicapi = importlib.import_module("ytmusicapi")
-    results: list[ConfigValueOption] = []
-
-    # Extract SAPISID for auth header
-    sapisid = None
-    for part in cookie.split(";"):
-        part = part.strip()
-        if part.startswith("SAPISID="):
-            sapisid = part.split("=", 1)[1]
-            break
-        if part.startswith("__Secure-3PAPISID="):
-            sapisid = part.split("=", 1)[1]
-            break
-    if not sapisid:
-        return results
-
-    timestamp = str(int(time.time()))
-    hash_input = f"{timestamp} {sapisid} {YTM_DOMAIN}"
-    sapisid_hash = hashlib.sha1(hash_input.encode()).hexdigest()
-
-    for authuser in range(5):
-        try:
-            headers = {
-                "cookie": cookie,
-                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "x-goog-authuser": str(authuser),
-                "x-origin": YTM_DOMAIN,
-                "origin": YTM_DOMAIN,
-                "authorization": f"SAPISIDHASH {timestamp}_{sapisid_hash}",
-            }
-            auth_file = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".json", delete=False, prefix="ytm_detect_"
-            )
-            json.dump(headers, auth_file)
-            auth_file.close()
-
-            yt = ytmusicapi.YTMusic(auth=auth_file.name)
-            playlists = yt.get_library_playlists(limit=5)
-            playlist_count = len(playlists)
-            # Get channel name from home page or use playlist info
-            label = f"Account {authuser}"
-            if playlist_count > 0:
-                # Try to get a meaningful name from the playlists
-                names = [p.get("title") for p in playlists[:3] if p.get("title")]
-                label = f"Account {authuser} ({playlist_count} playlists: {', '.join(names[:2])})"
-                results.append(ConfigValueOption(title=label, value=str(authuser)))
-        except Exception:
-            continue
-    return results
 
 
 class YoutubeMusicFreeProvider(MusicProvider):
@@ -253,10 +183,10 @@ class YoutubeMusicFreeProvider(MusicProvider):
             cookie = self.config.get_value(CONF_COOKIE) or ""
             if cookie:
                 try:
-                    authuser = self.config.get_value(CONF_BRAND_ACCOUNT) or "0"
-                    auth_file = self._build_auth_file(cookie, authuser=authuser)
+                    brand_account = self.config.get_value(CONF_BRAND_ACCOUNT) or None
+                    auth_file = self._build_auth_file(cookie)
                     self._ytmusic = await asyncio.to_thread(
-                        self._create_ytmusic_client, auth=auth_file
+                        self._create_ytmusic_client, auth=auth_file, user=brand_account
                     )
                     # Validate auth by making a lightweight library call
                     await asyncio.to_thread(self._ytmusic.get_library_songs, limit=1)
@@ -281,14 +211,14 @@ class YoutubeMusicFreeProvider(MusicProvider):
         if not self._authenticated:
             self.logger.info("YouTube Music (Free) initialized — anonymous mode")
 
-    def _create_ytmusic_client(self, auth: str | None = None):
+    def _create_ytmusic_client(self, auth: str | None = None, user: str | None = None):
         """Create a YTMusic client, optionally with authentication."""
         ytmusicapi = importlib.import_module("ytmusicapi")
         if auth:
-            return ytmusicapi.YTMusic(auth=auth)
+            return ytmusicapi.YTMusic(auth=auth, user=user)
         return ytmusicapi.YTMusic()
 
-    def _build_auth_file(self, cookie: str, authuser: str = "0") -> str:
+    def _build_auth_file(self, cookie: str) -> str:
         """Create a browser auth file and return the path."""
         import hashlib
         import json
@@ -322,7 +252,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
             "accept": "*/*",
             "accept-language": "en-US,en;q=0.5",
             "content-type": "application/json",
-            "x-goog-authuser": authuser,
+            "x-goog-authuser": "0",
             "x-origin": YTM_DOMAIN,
             "origin": YTM_DOMAIN,
             "authorization": f"SAPISIDHASH {timestamp}_{sapisid_hash}",
