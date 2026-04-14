@@ -137,10 +137,19 @@ done
 
 ### 1. Create the add-on directory
 
-Open the Terminal add-on and create the directory structure:
+Open the Terminal add-on and create the directory structure. The path depends on your HA installation type:
+
+| Installation | Local add-ons path |
+|---|---|
+| **HAOS** | `/mnt/data/supervisor/addons/local/` |
+| **Supervised / Container** | `/root/addons/` |
 
 ```bash
+# HAOS
 mkdir -p /mnt/data/supervisor/addons/local/ma_provider_watcher
+
+# Supervised / Container
+mkdir -p /root/addons/ma_provider_watcher
 ```
 
 ### 2. Copy the provider files
