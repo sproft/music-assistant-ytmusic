@@ -1,0 +1,24 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run shellcheck
+        run: |
+          shellcheck --version
+          shellcheck -s sh scripts/install_watcher_addon.sh
+          shellcheck -s sh tests/test_install_watcher_addon.sh
+
+      - name: Run installer test suite (POSIX sh, dash)
+        run: dash tests/test_install_watcher_addon.sh
+
+      - name: Run installer test suite (bash, for parity)
+        run: bash tests/test_install_watcher_addon.sh
