@@ -129,6 +129,8 @@ if [ "$network_ok" = "1" ]; then
     install_rc=$?
 
     assert_eq "install exits 0" "0" "$install_rc"
+    assert_contains "install output reports completion" "Install complete" "$install_out"
+    assert_contains "install output reports next steps" "Next steps:" "$install_out"
 
     ADDON="$TMP_ADDONS/ma_provider_watcher"
     assert_file_exists "config.yaml created"  "$ADDON/config.yaml"
@@ -181,6 +183,7 @@ if [ "$network_ok" = "1" ]; then
     else
         fail "re-install without --force and 'n' answer aborts" "exit code was 0"
     fi
+    assert_contains "abort output mentions --force" "--force" "$abort_out"
     assert_file_exists "aborted re-install leaves sentinel intact" "$ADDON/SENTINEL"
 
     # With --force, sentinel must be gone afterwards.
