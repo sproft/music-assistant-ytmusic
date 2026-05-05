@@ -133,7 +133,29 @@ done
 
 ---
 
-## Installation
+## Quick install (recommended)
+
+For most users the [`scripts/install_watcher_addon.sh`](scripts/install_watcher_addon.sh) installer handles steps 1–3 below automatically:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sproft/music-assistant-ytmusic/main/scripts/install_watcher_addon.sh | sh
+```
+
+The script is POSIX `sh` (works on HAOS BusyBox `ash`), uses `curl + tar` instead of `git`, auto-detects the HAOS vs. Supervised add-ons path, and tries to detect the MA container ID and Python venv version. After it finishes, jump to [step 4 (Install the add-on)](#4-install-the-add-on) below.
+
+Common flags:
+- `--force` — overwrite an existing install without prompting
+- `--ref TAG` — pin to a release tag instead of `main`
+- `--ma-id ID` / `--python-version pythonX.Y` — override auto-detection
+- `--addons-dir DIR` — skip path auto-detection (useful for non-standard installs)
+
+Run `sh install_watcher_addon.sh --help` to see all options.
+
+> **Auto-detection caveats:** the MA container ID and Python version are detected via `docker ps` / `docker exec`, which requires running the script from a host shell with Docker access (e.g. the SSH & Web Terminal add-on with Protection Mode off, or the host shell on a Supervised install). If detection fails, the script falls back to `addon_d5369777_music_assistant` and `python3.13` and prints a warning — verify and re-run with `--ma-id` / `--python-version` if those defaults are wrong for your install.
+
+---
+
+## Manual installation
 
 ### 1. Create the add-on directory
 
@@ -164,6 +186,7 @@ cp -r /path/to/ytmusic_free /mnt/data/supervisor/addons/local/ma_provider_watche
 
 Create `config.yaml`, `build.yaml`, `Dockerfile`, and `run.sh` as shown above.
 
+<a id="4-install-the-add-on"></a>
 ### 4. Install the add-on
 
 In Home Assistant: **Settings → Add-ons → Add-on Store** (three-dot menu) → **Check for updates**. The **MA Provider Watcher** appears under **Local add-ons**. Click → **Install**.
