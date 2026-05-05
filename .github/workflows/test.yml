@@ -22,3 +22,23 @@ jobs:
 
       - name: Run installer test suite (bash, for parity)
         run: bash tests/test_install_watcher_addon.sh
+
+  busybox:
+    # Runs the suite inside Alpine, which uses BusyBox ash + BusyBox utilities
+    # (tar, grep, sed, mktemp, head). This is the same userland HAOS ships, so
+    # passing here is strong evidence the installer will work on a real HAOS
+    # box. We deliberately do NOT install git in the container — the script
+    # must rely on curl + tar only.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run installer test suite inside alpine (BusyBox ash)
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            alpine:3.20 \
+            sh -c 'apk add --no-cache curl ca-certificates >/dev/null \
+                   && echo "shell: $(readlink -f /bin/sh)" \
+                   && busybox --help 2>&1 | head -1 \
+                   && sh tests/test_install_watcher_addon.sh'
