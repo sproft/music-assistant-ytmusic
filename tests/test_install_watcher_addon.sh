@@ -198,6 +198,35 @@ if [ "$network_ok" = "1" ]; then
     runsh2="$(cat "$ADDON/run.sh" 2>/dev/null || echo '')"
     assert_contains "--force re-substitutes MA ID" 'MA="addon_FORCED_music_assistant"' "$runsh2"
     assert_contains "--force re-substitutes Python version" "/python3.42/" "$runsh2"
+
+    # --- Auto-detection fallback ---
+    # When no docker is present (or no MA-named container is running), the
+    # script must warn and fall back to the documented defaults rather than
+    # exit. This is the path BusyBox/HAOS-style sandboxed runs hit.
+    printf '\n== Auto-detection fallback ==\n'
+
+    rm -rf "$ADDON"
+    fallback_out="$(sh "$SCRIPT" --force --addons-dir "$TMP_ADDONS" 2>&1)"
+    fallback_rc=$?
+    assert_eq "fallback install exits 0" "0" "$fallback_rc"
+
+    if printf '%s' "$fallback_out" | grep -q 'could not auto-detect MA container'; then
+        pass "warns when MA container is not detected"
+        runsh3="$(cat "$ADDON/run.sh" 2>/dev/null || echo '')"
+        assert_contains "fallback MA ID baked into run.sh" \
+            'MA="addon_d5369777_music_assistant"' "$runsh3"
+    else
+        skip "test environment auto-detected an MA container -- warning path not exercised"
+    fi
+
+    if printf '%s' "$fallback_out" | grep -q 'could not auto-detect Python version'; then
+        pass "warns when Python version is not detected"
+        runsh3="$(cat "$ADDON/run.sh" 2>/dev/null || echo '')"
+        assert_contains "fallback Python version baked into run.sh" \
+            "/python3.13/" "$runsh3"
+    else
+        skip "test environment auto-detected a Python version -- fallback path not exercised"
+    fi
 fi
 
 # --- Summary ----------------------------------------------------------------
