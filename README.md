@@ -68,6 +68,8 @@ curl -fsSL https://raw.githubusercontent.com/sproft/music-assistant-ytmusic/main
 
 See **[WATCHER_ADDON.md](WATCHER_ADDON.md)** for the manual procedure, troubleshooting, and the available installer flags.
 
+> **If the automatic installer doesn't work on your system,** the [`v0.1.0-beta.1` pre-release](https://github.com/sproft/music-assistant-ytmusic/releases/tag/v0.1.0-beta.1) is a known-good checkpoint of the manual install path. Pin to it (the manual procedure in `WATCHER_ADDON.md` from that tag was the only documented option at the time and works on HAOS and Supervised installs) and please [open an issue](https://github.com/sproft/music-assistant-ytmusic/issues/new) so the installer can be fixed.
+
 ---
 
 ## Authentication (optional)
