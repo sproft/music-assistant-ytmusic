@@ -60,7 +60,13 @@ Go to **Settings → Apps → Add** in the MA UI. You should see **"YouTube Musi
 
 ### Keeping the provider across HA restarts
 
-If you restart HA (not just MA), the container is recreated and the provider files are lost. To automate re-installation, see **[WATCHER_ADDON.md](WATCHER_ADDON.md)** for a ready-to-use local HA add-on that watches for MA container restarts and re-copies the files automatically.
+If you restart HA (not just MA), the container is recreated and the provider files are lost. The recommended fix is the **MA Provider Watcher** local add-on, which re-copies the provider whenever the MA container is recreated. One-line install from a host shell:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sproft/music-assistant-ytmusic/main/scripts/install_watcher_addon.sh | sh
+```
+
+See **[WATCHER_ADDON.md](WATCHER_ADDON.md)** for the manual procedure, troubleshooting, and the available installer flags.
 
 ---
 
