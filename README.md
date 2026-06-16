@@ -135,6 +135,7 @@ The cookie must contain `__Secure-3PAPISID`, `SID`, `HSID`, and `SSID`. Cookies 
 | Feature | Without auth | With auth |
 |---------|:---:|:---:|
 | Search (tracks, albums, artists, playlists) | ✅ | ✅ |
+| Add by pasting a YouTube / YTM link | ✅ | ✅ |
 | Stream audio | ✅ | ✅ |
 | Artist top tracks / albums | ✅ | ✅ |
 | Similar tracks (song radio) | ✅ | ✅ |
@@ -144,6 +145,26 @@ The cookie must contain `__Secure-3PAPISID`, `SID`, `HSID`, and `SSID`. Cookies 
 | Personalized recommendations | ❌ | ✅ |
 | Library editing (add/remove) | ❌ | ✅ |
 | Podcast support | ❌ | ❌ |
+
+### Adding an arbitrary YouTube link
+
+Music Assistant's global search normally only surfaces YouTube **Music** catalog
+content. To add any specific YouTube or YouTube Music item — including plain
+`youtube.com` videos that aren't in the Music catalog — **paste its URL directly
+into the search box**. The provider detects the link and resolves it to a single
+playable result you can then play or add to your library.
+
+Recognized link formats:
+
+- Songs / videos: `https://music.youtube.com/watch?v=…`, `https://www.youtube.com/watch?v=…`, `https://youtu.be/…`
+- Playlists: `https://music.youtube.com/playlist?list=…`, `https://www.youtube.com/playlist?list=…`
+
+Notes:
+
+- A watch link that also carries a `list=` parameter resolves to the **song**, not the surrounding playlist.
+- A pasted link bypasses any media-type filter — a deliberate paste always resolves.
+- Plain (non-Music) videos still play; their metadata (title, uploader) may be sparse.
+- Albums are intentionally left to normal search, since YouTube albums already carry the metadata needed to surface there.
 
 ---
 
