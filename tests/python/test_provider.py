@@ -774,6 +774,52 @@ def test_parse_youtube_url(provider, query, expected):
     assert provider._parse_youtube_url(query) == expected
 
 
+@pytest.mark.parametrize(
+    "query, expected",
+    [
+        # MA's search controller does: query.replace("/", " ").replace("'", "")
+        # before calling the provider, destroying "://" and path separators.
+        # These are the exact forms the provider actually receives.
+        ("https:  www.youtube.com watch?v=S33tWZqXhnk", ("track", "S33tWZqXhnk")),
+        ("https:  music.youtube.com watch?v=S33tWZqXhnk", ("track", "S33tWZqXhnk")),
+        ("https:  m.youtube.com watch?v=S33tWZqXhnk", ("track", "S33tWZqXhnk")),
+        # v + list together still resolves to the track
+        ("https:  music.youtube.com watch?v=S33tWZqXhnk&list=PLabc", ("track", "S33tWZqXhnk")),
+        ("https:  www.youtube.com watch?v=S33tWZqXhnk list=PLabc", ("track", "S33tWZqXhnk")),
+        # mangled playlist URL
+        ("https:  music.youtube.com playlist?list=PLabcdefghij", ("playlist", "PLabcdefghij")),
+        ("https:  www.youtube.com playlist?list=PLabcdefghij", ("playlist", "PLabcdefghij")),
+        # mangled youtu.be short link
+        ("https:  youtu.be S33tWZqXhnk", ("track", "S33tWZqXhnk")),
+        # a youtube host token but no valid id -> not a link
+        ("a song called youtube.com is great", None),
+        ("youtube.com", None),
+        # ordinary text searches must not be hijacked
+        ("the youtuber song", None),
+        ("watch v in the dark", None),
+    ],
+)
+def test_parse_youtube_url_handles_ma_mangled_query(provider, query, expected):
+    """MA strips '/' from the query before calling search(); the parser must
+    still recover the id from that sanitized form."""
+    assert provider._parse_youtube_url(query) == expected
+
+
+def test_search_with_ma_mangled_video_url_returns_track(provider):
+    """End-to-end: the de-slashed query MA actually delivers still resolves."""
+    mock = MagicMock()
+    mock.get_song = MagicMock(
+        return_value={"videoDetails": {"videoId": "S33tWZqXhnk", "title": "x", "author": "a"}}
+    )
+    mock.search = MagicMock(side_effect=AssertionError("text search must not run for a URL"))
+    provider._ytmusic = mock
+    results = asyncio.run(
+        provider.search("https:  www.youtube.com watch?v=S33tWZqXhnk", [MediaType.TRACK])
+    )
+    assert len(results.tracks) == 1
+    assert results.tracks[0].item_id == "S33tWZqXhnk"
+
+
 def test_search_with_video_url_returns_single_track(provider):
     """Pasting a watch URL resolves the video to one Track via get_song."""
     mock = MagicMock()

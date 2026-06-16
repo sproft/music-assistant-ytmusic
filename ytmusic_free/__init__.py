@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import re
 import time
 from collections.abc import AsyncGenerator
 from contextlib import suppress
@@ -117,6 +118,18 @@ RECOMMENDED_AUTH_COOKIES = ("__Secure-1PSID", "__Secure-3PSID", "SAPISID")
 # network or parsing error). ytmusicapi surfaces httpx.HTTPStatusError with the
 # response status in the message, so plain substring matching is sufficient.
 AUTH_LAPSE_ERROR_MARKERS = ("401", "Unauthorized")
+
+# Music Assistant's core search controller sanitizes the query before handing it
+# to a provider, replacing every "/" with a space and stripping "'"
+# (controllers/music.py: search_query.replace("/", " ").replace("'", "")). This
+# destroys the "://" and path separators of a pasted URL, so urlparse can no
+# longer recognize it. These regexes recover the YouTube id from either the
+# original URL or that mangled form. A YouTube video id is 11 chars of
+# [A-Za-z0-9_-]; playlist ids are longer and use the same alphabet.
+_YT_HOST_TOKEN = re.compile(r"(?:^|[^\w.])(?:music\.|m\.|www\.)?youtube\.com(?:[/\s?]|$)", re.I)
+_YT_SHORT_TOKEN = re.compile(r"(?:^|[^\w.])youtu\.be[/\s]+([\w-]{11})", re.I)
+_YT_VIDEO_ID = re.compile(r"[?&\s]v=([\w-]{11})", re.I)
+_YT_LIST_ID = re.compile(r"[?&\s]list=([\w-]{10,})", re.I)
 
 
 async def setup(
@@ -364,8 +377,8 @@ class YoutubeMusicFreeProvider(MusicProvider):
 
         return parsed_results
 
-    @staticmethod
-    def _parse_youtube_url(query: str) -> tuple[str, str] | None:
+    @classmethod
+    def _parse_youtube_url(cls, query: str) -> tuple[str, str] | None:
         """Resolve a YouTube/YTM URL to ``(kind, id)`` or ``None``.
 
         ``kind`` is ``"track"`` (for a ``videoId``) or ``"playlist"`` (for a
@@ -375,12 +388,23 @@ class YoutubeMusicFreeProvider(MusicProvider):
         Disambiguation: a watch URL that also carries a ``list`` param (a video
         opened inside a playlist) resolves to the track — pasting a song link
         should add the song, not the surrounding playlist.
+
+        Tries a strict ``urlparse`` first (handles well-formed URLs and bare
+        host-prefixed strings), then a mangle-tolerant regex fallback for the
+        form MA's search controller produces after stripping "/" and "'".
         """
         if not isinstance(query, str):
             return None
         candidate = query.strip()
         if not candidate:
             return None
+        if strict := cls._parse_youtube_url_strict(candidate):
+            return strict
+        return cls._parse_youtube_url_mangled(candidate)
+
+    @staticmethod
+    def _parse_youtube_url_strict(candidate: str) -> tuple[str, str] | None:
+        """Parse a well-formed YouTube URL via ``urlparse``."""
         # Be lenient about a missing scheme (e.g. "youtu.be/ID" pasted bare).
         if "://" not in candidate:
             if candidate.lower().startswith(("youtu.be/", "www.", "music.", "m.", "youtube.com/")):
@@ -422,6 +446,31 @@ class YoutubeMusicFreeProvider(MusicProvider):
         if list_ids := query_params.get("list"):
             if list_ids[0]:
                 return ("playlist", list_ids[0])
+
+        return None
+
+    @staticmethod
+    def _parse_youtube_url_mangled(candidate: str) -> tuple[str, str] | None:
+        """Recover a YouTube id from MA's sanitized (de-slashed) query string.
+
+        MA replaces "/" with " " and strips "'" before calling the provider, so
+        ``https://www.youtube.com/watch?v=ID`` arrives as
+        ``https:  www.youtube.com watch?v=ID``. Require a recognizable youtube
+        host token plus a valid id so ordinary text searches aren't hijacked.
+        """
+        is_short = _YT_SHORT_TOKEN.search(candidate)
+        if not is_short and not _YT_HOST_TOKEN.search(candidate):
+            return None
+
+        if is_short:
+            return ("track", is_short.group(1))
+
+        # A ?v= id always means the track, even when a list= is also present.
+        if video_match := _YT_VIDEO_ID.search(candidate):
+            return ("track", video_match.group(1))
+
+        if list_match := _YT_LIST_ID.search(candidate):
+            return ("playlist", list_match.group(1))
 
         return None
 
