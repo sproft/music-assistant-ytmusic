@@ -734,6 +734,138 @@ def test_search_skips_invalid_items(provider):
     assert results.tracks[0].item_id == "good"
 
 
+# ---------------------------------------------------------------------------
+# Search by pasted URL
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "query, expected",
+    [
+        # Single videos / songs
+        ("https://music.youtube.com/watch?v=abc123", ("track", "abc123")),
+        ("https://www.youtube.com/watch?v=abc123", ("track", "abc123")),
+        ("https://m.youtube.com/watch?v=abc123", ("track", "abc123")),
+        ("https://youtu.be/abc123", ("track", "abc123")),
+        ("https://youtu.be/abc123?si=xyz", ("track", "abc123")),
+        # v + list together resolves to the track, not the playlist
+        ("https://music.youtube.com/watch?v=abc123&list=PLxyz", ("track", "abc123")),
+        ("https://www.youtube.com/watch?v=abc123&t=42s&feature=share", ("track", "abc123")),
+        # Playlists
+        ("https://music.youtube.com/playlist?list=PLxyz", ("playlist", "PLxyz")),
+        ("https://www.youtube.com/playlist?list=PLxyz", ("playlist", "PLxyz")),
+        # Bare ?list= with no path still means a playlist
+        ("https://www.youtube.com/?list=PLxyz", ("playlist", "PLxyz")),
+        # Lenient: missing scheme
+        ("youtu.be/abc123", ("track", "abc123")),
+        ("music.youtube.com/watch?v=abc123", ("track", "abc123")),
+        # Not URLs / not YouTube
+        ("just a search query", None),
+        ("https://example.com/watch?v=abc123", None),
+        ("https://spotify.com/track/abc", None),
+        ("", None),
+        ("   ", None),
+        # YouTube host but no resolvable id
+        ("https://music.youtube.com/", None),
+        ("https://www.youtube.com/watch", None),
+    ],
+)
+def test_parse_youtube_url(provider, query, expected):
+    assert provider._parse_youtube_url(query) == expected
+
+
+def test_search_with_video_url_returns_single_track(provider):
+    """Pasting a watch URL resolves the video to one Track via get_song."""
+    mock = MagicMock()
+    mock.get_song = MagicMock(
+        return_value={
+            "videoDetails": {
+                "videoId": "abc123",
+                "title": "Pasted Song",
+                "lengthSeconds": "180",
+                "author": "Some Uploader",
+                "thumbnail": {"thumbnails": []},
+            }
+        }
+    )
+    # search must not be called for a URL
+    mock.search = MagicMock(side_effect=AssertionError("text search must not run for a URL"))
+    provider._ytmusic = mock
+    results = asyncio.run(
+        provider.search("https://music.youtube.com/watch?v=abc123", [MediaType.TRACK])
+    )
+    assert len(results.tracks) == 1
+    assert results.tracks[0].item_id == "abc123"
+    assert len(results.playlists) == 0
+
+
+def test_search_with_url_ignores_media_types_filter(provider):
+    """An explicit link resolves even when its type isn't in media_types."""
+    mock = MagicMock()
+    mock.get_song = MagicMock(
+        return_value={"videoDetails": {"videoId": "abc123", "title": "x", "author": "a"}}
+    )
+    mock.search = MagicMock(side_effect=AssertionError("text search must not run for a URL"))
+    provider._ytmusic = mock
+    # Searching only for ALBUM, but pasting a song link -> still returns the track.
+    results = asyncio.run(
+        provider.search("https://youtu.be/abc123", [MediaType.ALBUM])
+    )
+    assert len(results.tracks) == 1
+    assert results.tracks[0].item_id == "abc123"
+
+
+def test_search_with_non_music_video_falls_back_to_minimal_track(provider):
+    """A plain youtube.com video whose get_song fails still yields a playable track."""
+    mock = MagicMock()
+    mock.get_song = MagicMock(side_effect=RuntimeError("not a music catalog item"))
+    mock.search = MagicMock(side_effect=AssertionError("text search must not run for a URL"))
+    provider._ytmusic = mock
+    results = asyncio.run(
+        provider.search("https://www.youtube.com/watch?v=randomvid", [MediaType.TRACK])
+    )
+    assert len(results.tracks) == 1
+    assert results.tracks[0].item_id == "randomvid"
+
+
+def test_search_with_playlist_url_returns_single_playlist(provider):
+    """Pasting a playlist URL resolves it to one Playlist via get_playlist."""
+    mock = MagicMock()
+    mock.get_playlist = MagicMock(
+        return_value={
+            "id": "PLxyz",
+            "title": "Pasted Playlist",
+            "owner": "Someone",
+        }
+    )
+    mock.search = MagicMock(side_effect=AssertionError("text search must not run for a URL"))
+    provider._ytmusic = mock
+    results = asyncio.run(
+        provider.search("https://music.youtube.com/playlist?list=PLxyz", [MediaType.PLAYLIST])
+    )
+    assert len(results.playlists) == 1
+    assert results.playlists[0].item_id == "PLxyz"
+    assert len(results.tracks) == 0
+
+
+def test_search_with_url_resolution_failure_returns_empty(provider):
+    """If URL resolution raises, search returns empty results rather than erroring."""
+    mock = MagicMock()
+    mock.get_playlist = MagicMock(side_effect=RuntimeError("boom"))
+    provider._ytmusic = mock
+
+    # yt-dlp fallback path also fails -> _search_by_url swallows and returns empty.
+    async def _boom(_playlist_id):
+        raise RuntimeError("boom")
+
+    provider._get_playlist_via_ytdlp = _boom
+    results = asyncio.run(
+        provider.search("https://music.youtube.com/playlist?list=PLbad", [MediaType.PLAYLIST])
+    )
+    assert len(results.playlists) == 0
+    assert len(results.tracks) == 0
+
+
 def test_get_album_raises_when_not_found(provider):
     mock = MagicMock()
     mock.get_album = MagicMock(return_value=None)

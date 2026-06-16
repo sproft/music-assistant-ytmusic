@@ -311,6 +311,13 @@ class YoutubeMusicFreeProvider(MusicProvider):
         """Perform search on YouTube Music."""
         parsed_results = SearchResults()
 
+        # If the query is a YouTube/YTM URL, resolve it directly to a single
+        # item instead of doing a text search. An explicit link bypasses the
+        # media_types filter — a deliberate paste should always resolve.
+        if url_match := self._parse_youtube_url(search_query):
+            kind, item_id = url_match
+            return await self._search_by_url(kind, item_id)
+
         async def _search_type(ytm_filter: str | None) -> list[dict]:
             return await asyncio.to_thread(
                 self._ytmusic.search,
@@ -356,6 +363,83 @@ class YoutubeMusicFreeProvider(MusicProvider):
                 pass  # skip invalid items
 
         return parsed_results
+
+    @staticmethod
+    def _parse_youtube_url(query: str) -> tuple[str, str] | None:
+        """Resolve a YouTube/YTM URL to ``(kind, id)`` or ``None``.
+
+        ``kind`` is ``"track"`` (for a ``videoId``) or ``"playlist"`` (for a
+        ``list`` id). Returns ``None`` when ``query`` is not a recognized URL,
+        so the caller can fall through to a normal text search.
+
+        Disambiguation: a watch URL that also carries a ``list`` param (a video
+        opened inside a playlist) resolves to the track — pasting a song link
+        should add the song, not the surrounding playlist.
+        """
+        if not isinstance(query, str):
+            return None
+        candidate = query.strip()
+        if not candidate:
+            return None
+        # Be lenient about a missing scheme (e.g. "youtu.be/ID" pasted bare).
+        if "://" not in candidate:
+            if candidate.lower().startswith(("youtu.be/", "www.", "music.", "m.", "youtube.com/")):
+                candidate = f"https://{candidate}"
+            else:
+                return None
+
+        parsed = urlparse(candidate)
+        host = parsed.netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        youtube_hosts = {
+            "youtube.com",
+            "m.youtube.com",
+            "music.youtube.com",
+            "youtu.be",
+        }
+        if host not in youtube_hosts:
+            return None
+
+        # Short youtu.be links carry the video id in the path.
+        if host == "youtu.be":
+            video_id = parsed.path.lstrip("/").split("/")[0]
+            return ("track", unquote(video_id)) if video_id else None
+
+        query_params = parse_qs(parsed.query)
+        path = parsed.path.rstrip("/")
+
+        if video_ids := query_params.get("v"):
+            if video_ids[0]:
+                return ("track", video_ids[0])
+
+        if path.endswith("/playlist") or path == "/playlist":
+            if list_ids := query_params.get("list"):
+                if list_ids[0]:
+                    return ("playlist", list_ids[0])
+
+        # A bare ?list= on a watch/other path with no ?v= still means a playlist.
+        if list_ids := query_params.get("list"):
+            if list_ids[0]:
+                return ("playlist", list_ids[0])
+
+        return None
+
+    async def _search_by_url(self, kind: str, item_id: str) -> SearchResults:
+        """Resolve a pasted URL id into a single-item ``SearchResults``.
+
+        Failures degrade to empty results rather than raising, mirroring the
+        per-item resilience of the text-search path.
+        """
+        results = SearchResults()
+        try:
+            if kind == "track":
+                results.tracks.append(await self.get_track(item_id))
+            elif kind == "playlist":
+                results.playlists.append(await self.get_playlist(item_id))
+        except Exception as err:  # noqa: BLE001
+            self.logger.debug("search by url failed for %s %s: %s", kind, item_id, err)
+        return results
 
     async def get_track(self, prov_track_id: str) -> Track:
         """Get full track details by id."""
