@@ -23,7 +23,6 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from duration_parser import parse as parse_str_duration
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption, ConfigValueType
 from music_assistant_models.enums import (
     AlbumType,
@@ -130,6 +129,109 @@ _YT_HOST_TOKEN = re.compile(r"(?:^|[^\w.])(?:music\.|m\.|www\.)?youtube\.com(?:[
 _YT_SHORT_TOKEN = re.compile(r"(?:^|[^\w.])youtu\.be[/\s]+([\w-]{11})", re.I)
 _YT_VIDEO_ID = re.compile(r"[?&\s]v=([\w-]{11})", re.I)
 _YT_LIST_ID = re.compile(r"[?&\s]list=([\w-]{10,})", re.I)
+
+# Trim spec: an optional "@start-end" suffix a user appends to a pasted link to
+# play only part of a video (e.g. to skip an intro or an unrelated end-card).
+# Examples: "@15-222", "@0:15-3:42", "@1m30s-", "@-3:42". The "@", ":" and "-"
+# characters all survive MA's query sanitization (which only strips "/" and
+# "'"), so this works whether typed into the search box or used in a raw URL.
+# A YouTube video id is [A-Za-z0-9_-]{11} and never contains "@", so the same
+# "VIDEOID@start-end" encoding is reused as the persistent track item_id.
+_YT_TRIM_RE = re.compile(r"@\s*([0-9hms:.]*)\s*-\s*([0-9hms:.]*)\s*$", re.I)
+# A single timestamp token: bare seconds ("15", "15.5"), clock form ("3:42",
+# "1:02:03") or unit form ("1m30s", "2h", "90s").
+_TS_CLOCK_RE = re.compile(r"^\d+(?::\d{1,2}){0,2}(?:\.\d+)?$")
+_TS_UNIT_RE = re.compile(r"^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$", re.I)
+
+
+def _parse_timestamp(value: str) -> int | None:
+    """Parse a timestamp token into whole seconds, or ``None`` if invalid.
+
+    Accepts bare seconds (``"15"``), clock form (``"3:42"`` / ``"1:02:03"``) and
+    unit form (``"1m30s"`` / ``"2h"`` / ``"90s"``). An empty string means
+    "unbounded" and returns ``None`` (callers treat that as no bound).
+    """
+    if not value:
+        return None
+    token = value.strip().lower()
+    if not token:
+        return None
+    if _TS_CLOCK_RE.match(token):
+        parts = token.split(":")
+        try:
+            nums = [float(p) for p in parts]
+        except ValueError:
+            return None
+        seconds = 0.0
+        for num in nums:
+            seconds = seconds * 60 + num
+        return int(seconds)
+    if (match := _TS_UNIT_RE.match(token)) and any(match.groups()):
+        hours, minutes, secs = (int(g) if g else 0 for g in match.groups())
+        return hours * 3600 + minutes * 60 + secs
+    return None
+
+
+def _split_trim_spec(query: str) -> tuple[str, int | None, int | None]:
+    """Strip a trailing ``@start-end`` trim spec off ``query``.
+
+    Returns ``(query_without_spec, start, end)``. ``start``/``end`` are whole
+    seconds or ``None`` when unbounded/absent. An unparseable or empty spec is
+    left untouched on the returned query so it can't accidentally hide text.
+    """
+    if not isinstance(query, str) or "@" not in query:
+        return query, None, None
+    match = _YT_TRIM_RE.search(query)
+    if not match:
+        return query, None, None
+    start = _parse_timestamp(match.group(1))
+    end = _parse_timestamp(match.group(2))
+    if start is None and end is None:
+        return query, None, None
+    if start is not None and end is not None and start >= end:
+        # Nonsensical window: ignore the spec rather than producing empty audio.
+        return query, None, None
+    trimmed = query[: match.start()].rstrip()
+    return trimmed, start, end
+
+
+def _encode_track_id(video_id: str, start: int | None, end: int | None) -> str:
+    """Encode an optional trim window into a persistent track item_id."""
+    if start is None and end is None:
+        return video_id
+    start_str = str(start) if start is not None else ""
+    end_str = str(end) if end is not None else ""
+    return f"{video_id}@{start_str}-{end_str}"
+
+
+def _split_track_id(item_id: str) -> tuple[str, int | None, int | None]:
+    """Split an item_id into ``(video_id, start, end)``.
+
+    The inverse of :func:`_encode_track_id`. Ids without an ``@`` suffix (the
+    common case for normal search results) pass through unchanged.
+    """
+    if not isinstance(item_id, str) or "@" not in item_id:
+        return item_id, None, None
+    video_id, _, spec = item_id.partition("@")
+    start_str, _, end_str = spec.partition("-")
+    start = int(start_str) if start_str.isdigit() else None
+    end = int(end_str) if end_str.isdigit() else None
+    return video_id, start, end
+
+
+def _format_trim_label(start: int | None, end: int | None) -> str:
+    """Human-readable label for a trim window, e.g. ``"0:15–3:42"``."""
+
+    def _fmt(secs: int) -> str:
+        minutes, sec = divmod(secs, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours}:{minutes:02d}:{sec:02d}"
+        return f"{minutes}:{sec:02d}"
+
+    start_str = _fmt(start) if start is not None else ""
+    end_str = _fmt(end) if end is not None else ""
+    return f"{start_str}\u2013{end_str}"
 
 
 async def setup(
@@ -322,14 +424,26 @@ class YoutubeMusicFreeProvider(MusicProvider):
         limit: int = 5,
     ) -> SearchResults:
         """Perform search on YouTube Music."""
-        parsed_results = SearchResults()
-
-        # If the query is a YouTube/YTM URL, resolve it directly to a single
-        # item instead of doing a text search. An explicit link bypasses the
-        # media_types filter — a deliberate paste should always resolve.
+        # If the query is a YouTube/YTM URL, resolve it to the exact item rather
+        # than doing a plain text search. For a track we also run a normal text
+        # search using the resolved video's title, so the other results are
+        # related songs/albums/artists by name — not garbage matches on the raw
+        # URL string. An explicit link bypasses the media_types filter for the
+        # resolved item itself: a deliberate paste should always resolve.
         if url_match := self._parse_youtube_url(search_query):
             kind, item_id = url_match
-            return await self._search_by_url(kind, item_id)
+            return await self._search_by_url(kind, item_id, media_types, limit)
+
+        return await self._text_search(search_query, media_types, limit)
+
+    async def _text_search(
+        self,
+        search_query: str,
+        media_types: list[MediaType],
+        limit: int = 5,
+    ) -> SearchResults:
+        """Run a plain YTM text search and parse it into ``SearchResults``."""
+        parsed_results = SearchResults()
 
         async def _search_type(ytm_filter: str | None) -> list[dict]:
             return await asyncio.to_thread(
@@ -392,15 +506,27 @@ class YoutubeMusicFreeProvider(MusicProvider):
         Tries a strict ``urlparse`` first (handles well-formed URLs and bare
         host-prefixed strings), then a mangle-tolerant regex fallback for the
         form MA's search controller produces after stripping "/" and "'".
+
+        A trailing ``@start-end`` trim spec (see :func:`_split_trim_spec`) is
+        peeled off first and, for a resolved track, encoded into the returned id
+        as ``VIDEOID@start-end`` so the trim persists through playback and into
+        the library. The spec is ignored for playlists.
         """
         if not isinstance(query, str):
             return None
-        candidate = query.strip()
+        candidate, start, end = _split_trim_spec(query.strip())
+        candidate = candidate.strip()
         if not candidate:
             return None
-        if strict := cls._parse_youtube_url_strict(candidate):
-            return strict
-        return cls._parse_youtube_url_mangled(candidate)
+        resolved = cls._parse_youtube_url_strict(candidate)
+        if resolved is None:
+            resolved = cls._parse_youtube_url_mangled(candidate)
+        if resolved is None:
+            return None
+        kind, item_id = resolved
+        if kind == "track" and (start is not None or end is not None):
+            item_id = _encode_track_id(item_id, start, end)
+        return (kind, item_id)
 
     @staticmethod
     def _parse_youtube_url_strict(candidate: str) -> tuple[str, str] | None:
@@ -474,40 +600,113 @@ class YoutubeMusicFreeProvider(MusicProvider):
 
         return None
 
-    async def _search_by_url(self, kind: str, item_id: str) -> SearchResults:
-        """Resolve a pasted URL id into a single-item ``SearchResults``.
+    async def _search_by_url(
+        self,
+        kind: str,
+        item_id: str,
+        media_types: list[MediaType],
+        limit: int = 5,
+    ) -> SearchResults:
+        """Resolve a pasted URL id into ``SearchResults``.
 
-        Failures degrade to empty results rather than raising, mirroring the
-        per-item resilience of the text-search path.
+        For a playlist this is just the single resolved playlist. For a track,
+        the resolved video is placed first, then a normal text search on the
+        video's title fills in related tracks/albums/artists/playlists (deduped
+        against the raw video). Failures degrade to whatever resolved so far
+        rather than raising, mirroring the per-item resilience of text search.
         """
         results = SearchResults()
-        try:
-            if kind == "track":
-                results.tracks.append(await self.get_track(item_id))
-            elif kind == "playlist":
+        if kind == "playlist":
+            try:
                 results.playlists.append(await self.get_playlist(item_id))
+            except Exception as err:  # noqa: BLE001
+                self.logger.debug("search by url failed for playlist %s: %s", item_id, err)
+            return results
+
+        # kind == "track"
+        raw_track = None
+        try:
+            raw_track = await self.get_track(item_id)
         except Exception as err:  # noqa: BLE001
-            self.logger.debug("search by url failed for %s %s: %s", kind, item_id, err)
+            self.logger.debug("search by url failed for track %s: %s", item_id, err)
+
+        # The explicitly pasted video always resolves, even if TRACK isn't in the
+        # requested media_types — a deliberate paste should always return it.
+        if raw_track is not None:
+            results.tracks.append(raw_track)
+
+        # Run a name search using the resolved title so the rest of the results
+        # are related items, not matches on the raw URL string. Skip it when the
+        # title couldn't be resolved (falls back to the bare id) to avoid noise.
+        video_id, _, _ = _split_track_id(item_id)
+        title = raw_track.name if raw_track is not None else None
+        if title and title not in (video_id, item_id):
+            try:
+                named = await self._text_search(title, media_types, limit)
+            except Exception as err:  # noqa: BLE001
+                self.logger.debug("name search failed for %r: %s", title, err)
+            else:
+                results.artists.extend(named.artists)
+                results.albums.extend(named.albums)
+                results.playlists.extend(named.playlists)
+                # Don't list the pasted video twice.
+                results.tracks.extend(
+                    t for t in named.tracks if _split_track_id(t.item_id)[0] != video_id
+                )
         return results
 
     async def get_track(self, prov_track_id: str) -> Track:
-        """Get full track details by id."""
+        """Get full track details by id.
+
+        ``prov_track_id`` may carry a trim window (``VIDEOID@start-end``). The
+        YTM API is queried with the bare video id, but the returned Track keeps
+        the encoded id so the trim persists, and its duration reflects the
+        trimmed window.
+        """
+        video_id, start, end = _split_track_id(prov_track_id)
         try:
-            track_obj = await asyncio.to_thread(self._ytmusic.get_song, prov_track_id)
+            track_obj = await asyncio.to_thread(self._ytmusic.get_song, video_id)
             video_details = track_obj.get("videoDetails", {}) if track_obj else {}
             if video_details:
                 normalized = {
-                    "videoId": video_details.get("videoId", prov_track_id),
-                    "title": video_details.get("title", prov_track_id),
+                    "videoId": video_details.get("videoId", video_id),
+                    "title": video_details.get("title", video_id),
                     "duration_seconds": video_details.get("lengthSeconds"),
                     "artists": [{"name": video_details.get("author", "Unknown"), "id": None}],
                     "thumbnails": video_details.get("thumbnail", {}).get("thumbnails", []),
                     "isAvailable": True,
                 }
-                return self._parse_track(normalized)
+                track = self._parse_track(normalized)
+                return self._apply_trim(track, prov_track_id, start, end)
         except Exception as e:
-            self.logger.debug("get_song failed for %s: %s", prov_track_id, e)
+            self.logger.debug("get_song failed for %s: %s", video_id, e)
         return self._minimal_track(prov_track_id)
+
+    def _apply_trim(
+        self, track: Track, encoded_id: str, start: int | None, end: int | None
+    ) -> Track:
+        """Re-key a parsed track to its encoded (trimmed) id and fix duration.
+
+        ``_parse_track`` keys the track off the bare video id; when a trim window
+        is present we swap in the encoded id (on both the track and its provider
+        mapping) and adjust the reported duration to the trimmed length so the
+        UI shows the right time and progress bar.
+        """
+        if start is None and end is None:
+            return track
+        full_duration = track.duration or 0
+        upper = end if end is not None else full_duration
+        lower = start or 0
+        if upper and upper > lower:
+            track.duration = upper - lower
+        track.item_id = encoded_id
+        for mapping in track.provider_mappings:
+            mapping.item_id = encoded_id
+        # Flag the trim in the version so trimmed entries are distinguishable in
+        # the library/playlists without changing the song name itself.
+        trim_label = _format_trim_label(start, end)
+        track.version = f"{track.version} [{trim_label}]".strip() if track.version else f"[{trim_label}]"
+        return track
 
     async def get_album(self, prov_album_id: str) -> Album:
         """Get full album details by id."""
@@ -640,8 +839,9 @@ class YoutubeMusicFreeProvider(MusicProvider):
             )
             if not playlist_obj or "tracks" not in playlist_obj:
                 raise ValueError("No tracks in playlist response")
+            tracks_raw = playlist_obj["tracks"] or []
             result = []
-            for index, track_obj in enumerate(playlist_obj["tracks"], 1):
+            for index, track_obj in enumerate(tracks_raw, 1):
                 if not track_obj.get("isAvailable", True):
                     continue
                 with suppress(InvalidDataError, KeyError, TypeError):
@@ -649,6 +849,13 @@ class YoutubeMusicFreeProvider(MusicProvider):
                     if track:
                         track.position = index
                         result.append(track)
+            expected_count = self._parse_playlist_track_count(playlist_obj)
+            if not tracks_raw or (
+                expected_count is not None and len(tracks_raw) < expected_count
+            ):
+                ytdlp_result = await self._get_playlist_tracks_via_ytdlp(prov_playlist_id)
+                if len(ytdlp_result) > len(result):
+                    return self._merge_playlist_track_results(result, ytdlp_result)
             return result
         except (MediaNotFoundError, UnplayableMediaError):
             raise
@@ -659,6 +866,34 @@ class YoutubeMusicFreeProvider(MusicProvider):
                 prov_playlist_id,
             )
             return await self._get_playlist_tracks_via_ytdlp(prov_playlist_id)
+
+    @staticmethod
+    def _parse_playlist_track_count(playlist_obj: dict) -> int | None:
+        """Return the playlist's reported track count when ytmusicapi exposes it."""
+        raw_count = playlist_obj.get("trackCount") or playlist_obj.get("count")
+        if raw_count is None:
+            return None
+        if isinstance(raw_count, int):
+            return raw_count
+        if isinstance(raw_count, str):
+            if match := re.search(r"\d+", raw_count.replace(",", "")):
+                return int(match.group(0))
+        return None
+
+    @staticmethod
+    def _merge_playlist_track_results(primary: list[Track], fallback: list[Track]) -> list[Track]:
+        """Merge yt-dlp-only entries into the richer ytmusicapi result when possible."""
+        if not primary:
+            return fallback
+        primary_by_id = {track.item_id: track for track in primary}
+        fallback_ids = {track.item_id for track in fallback}
+        if not fallback_ids.intersection(primary_by_id):
+            return fallback
+
+        merged = [primary_by_id.get(track.item_id, track) for track in fallback]
+        merged_ids = {track.item_id for track in merged}
+        merged.extend(track for track in primary if track.item_id not in merged_ids)
+        return merged
 
     @staticmethod
     def _yt_playlist_url(playlist_id: str) -> str:
@@ -789,10 +1024,17 @@ class YoutubeMusicFreeProvider(MusicProvider):
         return tracks
 
     async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
-        """Return stream details for the given track."""
-        stream_format = await self._get_stream_format(item_id)
+        """Return stream details for the given track.
+
+        ``item_id`` may carry a trim window (``VIDEOID@start-end``): the bare
+        video id is used to resolve the stream, and ffmpeg input args trim the
+        audio to that window so unwanted intros/outros (e.g. end-card audio)
+        don't play.
+        """
+        video_id, start, end = _split_track_id(item_id)
+        stream_format = await self._get_stream_format(video_id)
         self.logger.debug(
-            "Resolved stream format '%s' for track %s", stream_format.get("format"), item_id
+            "Resolved stream format '%s' for track %s", stream_format.get("format"), video_id
         )
 
         url = stream_format["url"]
@@ -820,6 +1062,26 @@ class YoutubeMusicFreeProvider(MusicProvider):
         if sample_rate := stream_format.get("asr"):
             with suppress(ValueError, TypeError):
                 stream_details.audio_format.sample_rate = int(sample_rate)
+
+        # Apply the trim window via ffmpeg input args. -ss as an *input* option
+        # seeks before decoding (fast & accurate enough for audio); -t bounds the
+        # output duration relative to that seek, so it's computed as end-start.
+        if start is not None or end is not None:
+            trim_args: list[str] = []
+            if start:
+                trim_args += ["-ss", str(start)]
+            if end is not None:
+                duration = end - (start or 0)
+                if duration > 0:
+                    trim_args += ["-t", str(duration)]
+            if trim_args:
+                stream_details.extra_input_args = [
+                    *getattr(stream_details, "extra_input_args", []),
+                    *trim_args,
+                ]
+                # Report the trimmed length so the progress bar is correct.
+                if end is not None:
+                    stream_details.duration = end - (start or 0)
         return stream_details
 
     # ------------------------------------------------------------------
@@ -1104,13 +1366,15 @@ class YoutubeMusicFreeProvider(MusicProvider):
         """Extract the best audio stream URL via yt-dlp (no cookies required)."""
 
         prefer_quality = self._prefer_quality
+        # Defensive: strip any trim suffix so yt-dlp always sees a bare video id.
+        video_id, _, _ = _split_track_id(item_id)
 
         def _extract() -> dict[str, Any]:
             if self._yt_dlp_module is None:
                 self._yt_dlp_module = importlib.import_module("yt_dlp")
             yt_dlp = self._yt_dlp_module
 
-            url = f"{YTM_DOMAIN}/watch?v={item_id}"
+            url = f"{YTM_DOMAIN}/watch?v={video_id}"
             ydl_opts = {
                 "quiet": True,
                 "no_warnings": True,
@@ -1131,7 +1395,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
                     raise UnplayableMediaError(str(err)) from err
 
                 if not info or "formats" not in info:
-                    raise UnplayableMediaError(f"No formats found for {item_id}")
+                    raise UnplayableMediaError(f"No formats found for {video_id}")
 
                 # Build format selector: prefer m4a for best quality, fallback to any audio
                 fmt_selector_str = "m4a/bestaudio/best" if prefer_quality else "worstaudio/worst"
@@ -1156,17 +1420,23 @@ class YoutubeMusicFreeProvider(MusicProvider):
         return await asyncio.to_thread(_extract)
 
     def _minimal_track(self, track_id: str) -> Track:
-        """Return a bare-minimum Track so playback can still proceed."""
+        """Return a bare-minimum Track so playback can still proceed.
+
+        ``track_id`` may be a trimmed (``VIDEOID@start-end``) id: the watch URL
+        uses the bare video id while the track keeps the encoded id so the trim
+        survives even when metadata lookup failed.
+        """
+        video_id, _, _ = _split_track_id(track_id)
         return Track(
             item_id=track_id,
             provider=self.instance_id,
-            name=track_id,
+            name=video_id,
             provider_mappings={
                 ProviderMapping(
                     item_id=track_id,
                     provider_domain=self.domain,
                     provider_instance=self.instance_id,
-                    url=f"{YTM_DOMAIN}/watch?v={track_id}",
+                    url=f"{YTM_DOMAIN}/watch?v={video_id}",
                     audio_format=AudioFormat(content_type=ContentType.M4A),
                 )
             },

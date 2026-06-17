@@ -811,17 +811,16 @@ def test_search_with_ma_mangled_video_url_returns_track(provider):
     mock.get_song = MagicMock(
         return_value={"videoDetails": {"videoId": "S33tWZqXhnk", "title": "x", "author": "a"}}
     )
-    mock.search = MagicMock(side_effect=AssertionError("text search must not run for a URL"))
+    mock.search = MagicMock(return_value=[])
     provider._ytmusic = mock
     results = asyncio.run(
         provider.search("https:  www.youtube.com watch?v=S33tWZqXhnk", [MediaType.TRACK])
     )
-    assert len(results.tracks) == 1
     assert results.tracks[0].item_id == "S33tWZqXhnk"
 
 
-def test_search_with_video_url_returns_single_track(provider):
-    """Pasting a watch URL resolves the video to one Track via get_song."""
+def test_search_with_video_url_returns_track_first(provider):
+    """Pasting a watch URL resolves the video to a Track placed first."""
     mock = MagicMock()
     mock.get_song = MagicMock(
         return_value={
@@ -834,15 +833,73 @@ def test_search_with_video_url_returns_single_track(provider):
             }
         }
     )
-    # search must not be called for a URL
-    mock.search = MagicMock(side_effect=AssertionError("text search must not run for a URL"))
+    mock.search = MagicMock(return_value=[])
     provider._ytmusic = mock
     results = asyncio.run(
         provider.search("https://music.youtube.com/watch?v=abc123", [MediaType.TRACK])
     )
-    assert len(results.tracks) == 1
     assert results.tracks[0].item_id == "abc123"
     assert len(results.playlists) == 0
+
+
+def test_search_with_video_url_runs_name_search_on_title(provider):
+    """The other results come from a text search on the resolved video title."""
+    mock = MagicMock()
+    mock.get_song = MagicMock(
+        return_value={
+            "videoDetails": {
+                "videoId": "abc123",
+                "title": "Pasted Song",
+                "author": "Some Uploader",
+            }
+        }
+    )
+
+    def _search(query, filter=None, limit=5):  # noqa: A002
+        # The text search must use the resolved title, never the raw URL.
+        assert query == "Pasted Song"
+        if filter == "songs":
+            return [
+                {
+                    "resultType": "song",
+                    "videoId": "related1",
+                    "title": "Related",
+                    "artists": [{"id": "UCx", "name": "A"}],
+                }
+            ]
+        return []
+
+    mock.search = MagicMock(side_effect=_search)
+    provider._ytmusic = mock
+    results = asyncio.run(
+        provider.search("https://music.youtube.com/watch?v=abc123", [MediaType.TRACK])
+    )
+    mock.search.assert_called()
+    assert results.tracks[0].item_id == "abc123"  # raw video first
+    assert any(t.item_id == "related1" for t in results.tracks)
+
+
+def test_search_with_video_url_dedupes_raw_video(provider):
+    """The pasted video isn't listed twice if it also surfaces in name search."""
+    mock = MagicMock()
+    mock.get_song = MagicMock(
+        return_value={"videoDetails": {"videoId": "abc123", "title": "Song", "author": "a"}}
+    )
+    mock.search = MagicMock(
+        return_value=[
+            {
+                "resultType": "song",
+                "videoId": "abc123",
+                "title": "Song",
+                "artists": [{"id": "UCx", "name": "A"}],
+            }
+        ]
+    )
+    provider._ytmusic = mock
+    results = asyncio.run(
+        provider.search("https://music.youtube.com/watch?v=abc123", [MediaType.TRACK])
+    )
+    assert [t.item_id for t in results.tracks] == ["abc123"]
 
 
 def test_search_with_url_ignores_media_types_filter(provider):
@@ -851,7 +908,7 @@ def test_search_with_url_ignores_media_types_filter(provider):
     mock.get_song = MagicMock(
         return_value={"videoDetails": {"videoId": "abc123", "title": "x", "author": "a"}}
     )
-    mock.search = MagicMock(side_effect=AssertionError("text search must not run for a URL"))
+    mock.search = MagicMock(return_value=[])
     provider._ytmusic = mock
     # Searching only for ALBUM, but pasting a song link -> still returns the track.
     results = asyncio.run(
@@ -910,6 +967,143 @@ def test_search_with_url_resolution_failure_returns_empty(provider):
     )
     assert len(results.playlists) == 0
     assert len(results.tracks) == 0
+
+
+# ---------------------------------------------------------------------------
+# Trim timestamps (@start-end)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "token, expected",
+    [
+        ("15", 15),
+        ("0:15", 15),
+        ("3:42", 222),
+        ("1:02:03", 3723),
+        ("1m30s", 90),
+        ("2h", 7200),
+        ("90s", 90),
+        ("", None),
+        ("   ", None),
+        ("abc", None),
+        ("1:2:3:4", None),
+    ],
+)
+def test_parse_timestamp(token, expected):
+    assert ytm._parse_timestamp(token) == expected
+
+
+@pytest.mark.parametrize(
+    "query, expected",
+    [
+        ("https://youtu.be/abc123 @15-222", ("https://youtu.be/abc123", 15, 222)),
+        ("https://youtu.be/abc123 @0:15-3:42", ("https://youtu.be/abc123", 15, 222)),
+        ("https://youtu.be/abc123 @15-", ("https://youtu.be/abc123", 15, None)),
+        ("https://youtu.be/abc123 @-3:42", ("https://youtu.be/abc123", None, 222)),
+        ("https://youtu.be/abc123@15-222", ("https://youtu.be/abc123", 15, 222)),
+        # No spec / unparseable spec -> query untouched, no bounds.
+        ("https://youtu.be/abc123", ("https://youtu.be/abc123", None, None)),
+        ("an email a@b thing", ("an email a@b thing", None, None)),
+        # start >= end is nonsensical -> ignored.
+        ("https://youtu.be/abc123 @3:42-0:15", ("https://youtu.be/abc123 @3:42-0:15", None, None)),
+    ],
+)
+def test_split_trim_spec(query, expected):
+    assert ytm._split_trim_spec(query) == expected
+
+
+@pytest.mark.parametrize(
+    "video_id, start, end, encoded",
+    [
+        ("abc12345678", None, None, "abc12345678"),
+        ("abc12345678", 15, 222, "abc12345678@15-222"),
+        ("abc12345678", 15, None, "abc12345678@15-"),
+        ("abc12345678", None, 222, "abc12345678@-222"),
+    ],
+)
+def test_encode_split_track_id_roundtrip(video_id, start, end, encoded):
+    assert ytm._encode_track_id(video_id, start, end) == encoded
+    assert ytm._split_track_id(encoded) == (video_id, start, end)
+
+
+def test_split_track_id_plain():
+    assert ytm._split_track_id("abc12345678") == ("abc12345678", None, None)
+
+
+def test_parse_youtube_url_encodes_trim(provider):
+    """A pasted link with a trim spec resolves to an encoded track id."""
+    assert provider._parse_youtube_url("https://youtu.be/abc12345678 @15-222") == (
+        "track",
+        "abc12345678@15-222",
+    )
+    # Playlists ignore the trim spec.
+    assert provider._parse_youtube_url(
+        "https://music.youtube.com/playlist?list=PLabcdefghij @15-222"
+    ) == ("playlist", "PLabcdefghij")
+
+
+def test_get_track_with_trim_encodes_id_and_duration(provider):
+    """get_track queries the bare id but returns an encoded, trimmed Track."""
+    mock = MagicMock()
+    mock.get_song = MagicMock(
+        return_value={
+            "videoDetails": {
+                "videoId": "abc12345678",
+                "title": "Song",
+                "lengthSeconds": "300",
+                "author": "a",
+            }
+        }
+    )
+    provider._ytmusic = mock
+    track = asyncio.run(provider.get_track("abc12345678@15-222"))
+    # Bare id used for the API lookup.
+    mock.get_song.assert_called_once_with("abc12345678")
+    # Encoded id persists on the track and its provider mapping.
+    assert track.item_id == "abc12345678@15-222"
+    assert all(m.item_id == "abc12345678@15-222" for m in track.provider_mappings)
+    # Watch URL still uses the bare id.
+    assert all("watch?v=abc12345678" in m.url for m in track.provider_mappings)
+    # Duration reflects the trimmed window.
+    assert track.duration == 222 - 15
+
+
+def test_minimal_track_with_trim_keeps_encoded_id(provider):
+    track = provider._minimal_track("abc12345678@15-222")
+    assert track.item_id == "abc12345678@15-222"
+    assert all("watch?v=abc12345678" in m.url for m in track.provider_mappings)
+    assert track.name == "abc12345678"
+
+
+def test_get_stream_details_adds_trim_args(provider):
+    async def _fmt(video_id):
+        assert video_id == "abc12345678"  # bare id reaches yt-dlp
+        return {"url": "https://stream.example/x", "ext": "m4a"}
+
+    provider._get_stream_format = _fmt
+    sd = asyncio.run(provider.get_stream_details("abc12345678@15-222", MediaType.TRACK))
+    assert sd.item_id == "abc12345678@15-222"
+    assert sd.extra_input_args == ["-ss", "15", "-t", str(222 - 15)]
+    assert sd.duration == 222 - 15
+
+
+def test_get_stream_details_open_ended_start_only(provider):
+    async def _fmt(video_id):
+        return {"url": "https://stream.example/x", "ext": "m4a"}
+
+    provider._get_stream_format = _fmt
+    sd = asyncio.run(provider.get_stream_details("abc12345678@15-", MediaType.TRACK))
+    assert sd.extra_input_args == ["-ss", "15"]
+
+
+def test_get_stream_details_no_trim_has_no_args(provider):
+    async def _fmt(video_id):
+        return {"url": "https://stream.example/x", "ext": "m4a"}
+
+    provider._get_stream_format = _fmt
+    sd = asyncio.run(provider.get_stream_details("abc12345678", MediaType.TRACK))
+    assert sd.extra_input_args == []
 
 
 def test_get_album_raises_when_not_found(provider):
@@ -979,6 +1173,95 @@ def test_get_track_normalizes_video_details(provider):
     assert track.item_id == "vid_y"
     assert track.name == "Some Song"
     assert track.duration == 200
+
+
+def test_get_playlist_tracks_uses_ytdlp_when_ytmusicapi_is_partial(provider):
+    mock = MagicMock()
+    mock.get_playlist = MagicMock(
+        return_value={
+            "trackCount": 3,
+            "tracks": [
+                {
+                    "videoId": "ytm_1",
+                    "title": "First",
+                    "artists": [{"id": "UC1", "name": "A"}],
+                },
+                {
+                    "videoId": "ytm_2",
+                    "title": "Second",
+                    "artists": [{"id": "UC1", "name": "A"}],
+                },
+            ],
+        }
+    )
+    provider._ytmusic = mock
+
+    async def _fallback(_playlist_id):
+        return [
+            provider._minimal_track(track_id)
+            for track_id in ("ytm_1", "ytm_2", "dlp_3")
+        ]
+
+    provider._get_playlist_tracks_via_ytdlp = _fallback
+
+    tracks = asyncio.run(provider.get_playlist_tracks("PLpartial"))
+
+    assert [track.item_id for track in tracks] == ["ytm_1", "ytm_2", "dlp_3"]
+    assert [track.name for track in tracks] == ["First", "Second", "dlp_3"]
+
+
+def test_get_playlist_tracks_keeps_ytmusicapi_when_complete(provider):
+    mock = MagicMock()
+    mock.get_playlist = MagicMock(
+        return_value={
+            "trackCount": "2 songs",
+            "tracks": [
+                {
+                    "videoId": "ytm_1",
+                    "title": "First",
+                    "artists": [{"id": "UC1", "name": "A"}],
+                },
+                {
+                    "videoId": "ytm_2",
+                    "title": "Second",
+                    "artists": [{"id": "UC1", "name": "A"}],
+                },
+            ],
+        }
+    )
+    provider._ytmusic = mock
+    fallback = MagicMock(side_effect=AssertionError("yt-dlp fallback should not run"))
+    provider._get_playlist_tracks_via_ytdlp = fallback
+
+    tracks = asyncio.run(provider.get_playlist_tracks("PLcomplete"))
+
+    assert [track.item_id for track in tracks] == ["ytm_1", "ytm_2"]
+
+
+def test_get_playlist_tracks_skips_unavailable_tracks(provider):
+    mock = MagicMock()
+    mock.get_playlist = MagicMock(
+        return_value={
+            "tracks": [
+                {
+                    "videoId": "gone",
+                    "title": "Gone",
+                    "artists": [{"id": "UC1", "name": "A"}],
+                    "isAvailable": False,
+                },
+                {
+                    "videoId": "available",
+                    "title": "Available",
+                    "artists": [{"id": "UC1", "name": "A"}],
+                },
+            ],
+        }
+    )
+    provider._ytmusic = mock
+
+    tracks = asyncio.run(provider.get_playlist_tracks("PLavailable"))
+
+    assert [track.item_id for track in tracks] == ["available"]
 
 
 def test_get_artist_unknown_prefix_returns_stub(provider):

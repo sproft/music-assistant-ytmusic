@@ -136,6 +136,7 @@ The cookie must contain `__Secure-3PAPISID`, `SID`, `HSID`, and `SSID`. Cookies 
 |---------|:---:|:---:|
 | Search (tracks, albums, artists, playlists) | ✅ | ✅ |
 | Add by pasting a YouTube / YTM link | ✅ | ✅ |
+| Trim a video with `@start-end` timestamps | ✅ | ✅ |
 | Stream audio | ✅ | ✅ |
 | Artist top tracks / albums | ✅ | ✅ |
 | Similar tracks (song radio) | ✅ | ✅ |
@@ -151,8 +152,8 @@ The cookie must contain `__Secure-3PAPISID`, `SID`, `HSID`, and `SSID`. Cookies 
 Music Assistant's global search normally only surfaces YouTube **Music** catalog
 content. To add any specific YouTube or YouTube Music item — including plain
 `youtube.com` videos that aren't in the Music catalog — **paste its URL directly
-into the search box**. The provider detects the link and resolves it to a single
-playable result you can then play or add to your library.
+into the search box**. The provider detects the link and resolves it to the exact
+item, placed first in the results, that you can then play or add to your library.
 
 Recognized link formats:
 
@@ -165,6 +166,32 @@ Notes:
 - A pasted link bypasses any media-type filter — a deliberate paste always resolves.
 - Plain (non-Music) videos still play; their metadata (title, uploader) may be sparse.
 - Albums are intentionally left to normal search, since YouTube albums already carry the metadata needed to surface there.
+
+#### Related results use the video's name
+
+When you paste a **track** link, the remaining results aren't matches on the raw
+URL string. The provider looks up the video's title and runs a normal search on
+that name, so the other results are related songs, albums and artists — while the
+pasted video itself stays at the top.
+
+#### Trimming a video (start / end timestamps)
+
+Some great finds have an unrelated intro or an end-card with extra audio. Append a
+`@start-end` trim spec to the link to play only part of the video:
+
+```
+https://youtu.be/VIDEOID @0:15-3:42      # play from 0:15 to 3:42
+https://youtu.be/VIDEOID @15-222          # same, in plain seconds
+https://youtu.be/VIDEOID @1m30s-          # from 1:30 to the natural end
+https://youtu.be/VIDEOID @-3:42           # from the start to 3:42
+```
+
+Timestamps accept plain seconds (`15`), clock form (`3:42`, `1:02:03`) or unit
+form (`1m30s`, `2h`, `90s`). The trim is encoded into the track, so it **persists**
+when you save the song to your library or a playlist and replays trimmed every
+time. The trimmed length is reflected in the duration/progress bar, and a `[start–end]`
+label is shown so trimmed entries are easy to spot. (The spec is ignored for
+playlist links.)
 
 ---
 
