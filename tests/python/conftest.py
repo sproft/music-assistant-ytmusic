@@ -298,6 +298,8 @@ def _install_music_assistant_models() -> None:
         can_seek: bool = True
         allow_seek: bool = True
         expiration: int = 0
+        duration: int | None = None
+        extra_input_args: list = field(default_factory=list)
 
     streamdetails.StreamDetails = _StreamDetails
 
