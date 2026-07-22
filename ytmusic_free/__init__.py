@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import os
 import re
 import time
 from collections.abc import AsyncGenerator
@@ -310,6 +311,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
     _prefer_quality: bool = True
     _authenticated: bool = False
     _auth_lapse_warned: bool = False
+    _auth_file_path: str | None = None
     # Per-category flag: True once we've seen a non-empty sync. Used to tell a
     # genuinely empty library apart from a partial-auth HTTP 200 response that
     # ytmusicapi unwraps to []. See issue #10.
@@ -354,6 +356,26 @@ class YoutubeMusicFreeProvider(MusicProvider):
 
         if not self._authenticated:
             self.logger.info("YouTube Music (Free) initialized — anonymous mode")
+
+    async def unload(self, is_removed: bool = False) -> None:
+        """Clean up resources when provider is unloaded.
+        
+        Called when provider is deregistered (e.g. MA exiting or config reloading).
+        Cleans up the instance-specific auth file to prevent stale cookies.
+        """
+        await super().unload(is_removed)
+        
+        # Clean up auth file if it exists
+        if self._auth_file_path and os.path.exists(self._auth_file_path):
+            try:
+                os.remove(self._auth_file_path)
+                self.logger.debug("Removed auth file: %s", self._auth_file_path)
+            except OSError as err:
+                self.logger.warning(
+                    "Failed to remove auth file %s: %s", self._auth_file_path, err
+                )
+            finally:
+                self._auth_file_path = None
 
     def _create_ytmusic_client(self, auth: str | None = None, user: str | None = None):
         """Create a YTMusic client, optionally with authentication."""
@@ -415,9 +437,14 @@ class YoutubeMusicFreeProvider(MusicProvider):
             "origin": YTM_DOMAIN,
             "authorization": f"SAPISIDHASH {timestamp}_{sapisid_hash}",
         }
-        auth_path = "/data/ytmusic_browser_auth.json"
+        # Use instance-specific auth file path in /data directory
+        auth_path = f"/data/ytmusic_browser_auth_{self.instance_id}.json"
+        
         with open(auth_path, "w") as f:
             json.dump(headers, f)
+        
+        # Store the auth path for cleanup in unload
+        self._auth_file_path = auth_path
         return auth_path
 
     async def search(

@@ -117,10 +117,12 @@ def test_build_auth_file_extracts_sapisid_when_present(provider, tmp_path, monke
         return _DummyFile(path)
 
     monkeypatch.setattr("builtins.open", _open)
+    
     cookie = "SAPISID=mySapisid; __Secure-3PAPISID=otherValue; SID=foo"
     path = provider._build_auth_file(cookie)
 
-    assert path == "/data/ytmusic_browser_auth.json"
+    assert provider.instance_id in path
+    assert path == f"/data/ytmusic_browser_auth_{provider.instance_id}.json"
     headers = json.loads("".join(captured["buffer"]))
     assert headers["cookie"] == cookie
     assert headers["origin"] == ytm.YTM_DOMAIN
@@ -1574,6 +1576,94 @@ def test_build_auth_file_substring_only_does_not_satisfy_recommendation(provider
     joined = " ".join(handler.messages())
     assert "__Secure-1PSID" in joined  # listed as missing
 
+
+# ---------------------------------------------------------------------------
+# Multi-instance support
+# ---------------------------------------------------------------------------
+
+
+def test_build_auth_file_uses_instance_id_in_path(provider, tmp_path, monkeypatch):
+    """Auth file path should include the instance_id to support multiple instances."""
+    captured = {}
+
+    class _DummyFile:
+        def __init__(self, path):
+            captured["path"] = path
+            captured["buffer"] = []
+
+        def write(self, data):
+            captured["buffer"].append(data)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _open(path, *a, **kw):
+        return _DummyFile(path)
+
+    monkeypatch.setattr("builtins.open", _open)
+    
+    cookie = "SAPISID=mySapisid; __Secure-3PAPISID=otherValue"
+    path = provider._build_auth_file(cookie)
+    
+    # Path should include instance_id
+    assert provider.instance_id in path
+    assert path == f"/data/ytmusic_browser_auth_{provider.instance_id}.json"
+
+
+def test_multi_instance_different_auth_paths(provider, tmp_path, monkeypatch):
+    """Different provider instances should produce different auth file paths."""
+    
+    captured_paths = []
+    
+    class _DummyFile:
+        def __init__(self, path):
+            captured_paths.append(path)
+            self.buffer = []
+
+        def write(self, data):
+            self.buffer.append(data)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _open(path, *a, **kw):
+        return _DummyFile(path)
+
+    monkeypatch.setattr("builtins.open", _open)
+    
+    # Create two provider instances with different instance_ids
+    from ytmusic_free import YoutubeMusicFreeProvider
+    
+    provider1 = YoutubeMusicFreeProvider(mass=None, manifest=None, config=None)
+    provider1.instance_id = "instance_1"
+    provider1._ytmusic = None
+    provider1._yt_dlp_module = None
+    provider1._prefer_quality = True
+    provider1._authenticated = False
+    
+    provider2 = YoutubeMusicFreeProvider(mass=None, manifest=None, config=None)
+    provider2.instance_id = "instance_2"
+    provider2._ytmusic = None
+    provider2._yt_dlp_module = None
+    provider2._prefer_quality = True
+    provider2._authenticated = False
+    
+    cookie = "SAPISID=mySapisid; __Secure-3PAPISID=otherValue"
+    
+    path1 = provider1._build_auth_file(cookie)
+    path2 = provider2._build_auth_file(cookie)
+    
+    # Paths should be different
+    assert path1 == "/data/ytmusic_browser_auth_instance_1.json"
+    assert path2 == "/data/ytmusic_browser_auth_instance_2.json"
+    assert path1 != path2
+    
 
 # ---------------------------------------------------------------------------
 # Auth-lapse detection in library calls

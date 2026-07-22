@@ -48,3 +48,7 @@ def test_manifest_requirements_pin_known_libs(manifest):
 
 def test_manifest_documentation_url_present(manifest):
     assert manifest.get("documentation", "").startswith("https://")
+
+
+def test_manifest_multi_instance_enabled(manifest):
+    assert manifest.get("multi_instance") is True
