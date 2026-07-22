@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import time
+import tempfile
 from collections.abc import AsyncGenerator
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
@@ -437,9 +438,20 @@ class YoutubeMusicFreeProvider(MusicProvider):
             "origin": YTM_DOMAIN,
             "authorization": f"SAPISIDHASH {timestamp}_{sapisid_hash}",
         }
-        # Use instance-specific auth file path in /data directory
-        auth_path = f"/data/ytmusic_browser_auth_{self.instance_id}.json"
-        
+        # Use instance-specific auth file path
+        auth_filename = f"ytmusic_browser_auth_{self.instance_id}.json"
+
+        # Try to use /data directory first, fall back to temp directory
+        data_dir = "/data"
+        if os.path.isdir(data_dir) and os.access(data_dir, os.W_OK):
+            auth_path = os.path.join(data_dir, auth_filename)
+        else:
+            temp_dir = tempfile.gettempdir()
+            auth_path = os.path.join(temp_dir, auth_filename)
+            self.logger.debug(
+                "Using temp directory for auth file: %s", auth_path
+            )
+
         with open(auth_path, "w") as f:
             json.dump(headers, f)
         
