@@ -219,11 +219,13 @@ Your cookie is stored by Music Assistant itself, in the encrypted provider confi
 | Library editing (add/remove) | ❌ | ✅ |
 | Multiple accounts side by side | ✅ | ✅ |
 | Podcasts: search, browse a show, play episodes | ✅ | ✅ |
-| Podcast library sync (subscriptions, saved episodes) | ❌ | ❌ |
+| Podcast library sync (subscribed shows) | ❌ | ✅ |
 
-> **Podcasts.** Search for a show, open it to see its most recent episodes, and play them. This works without an account, since YouTube answers all three anonymously. Episode length comes from YouTube; playback position is tracked by Music Assistant itself, because YouTube does not report one anonymously.
+> **Podcasts.** Search for a show, open it to see its most recent episodes, and play them. This works without an account, since YouTube answers all three anonymously. Episode length comes from YouTube; playback position is tracked by Music Assistant itself, because YouTube does not report one.
 >
-> Syncing your subscribed shows and saved episodes into the library is **not** implemented. Those endpoints need authentication, and declaring the feature without a working implementation behind it would make Music Assistant sync a library the provider cannot read, which is how [#55](https://github.com/sproft/music-assistant-ytmusic/issues/55) emptied people's libraries. It is tracked in [#52](https://github.com/sproft/music-assistant-ytmusic/issues/52) as a second pass.
+> With a cookie, the shows you subscribe to sync into your library alongside your music. The two auto-generated entries YouTube returns there, "New Episodes" and "Saved episodes", are skipped: they are not shows, and syncing them would leave two pseudo-subscriptions in your library that you cannot remove. Saved individual episodes are not synced, because Music Assistant's library has no place to put an episode outside its show.
+>
+> The subscribed-shows sync is the one part of this provider that has not been checked against a live account, because doing so needs credentials. If your subscriptions do not appear, or appear wrongly, please say so in [#52](https://github.com/sproft/music-assistant-ytmusic/issues/52) with what you see.
 
 ### Adding an arbitrary YouTube link
 

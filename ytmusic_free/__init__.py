@@ -141,6 +141,12 @@ AUTHENTICATED_FEATURES = {
     ProviderFeature.LIBRARY_ARTISTS_EDIT,
     ProviderFeature.LIBRARY_ALBUMS_EDIT,
     ProviderFeature.LIBRARY_PLAYLISTS_EDIT,
+    # Subscribed shows. Safe to declare unconditionally alongside the others
+    # only because get_library_podcasts goes through the same guards as every
+    # other library method: without auth it raises rather than reporting an
+    # empty library, so Music Assistant never reads it as "unsubscribe from
+    # everything". See issue #55.
+    ProviderFeature.LIBRARY_PODCASTS,
 }
 
 # YTM search filter per media type. YTM has no multi-type search, so a search
@@ -168,6 +174,18 @@ PODCAST_BROWSE_PREFIX = "MPSP"
 # most recent episodes is what a browse is for, and every extra page is another
 # request against a service that rate-limits.
 PODCAST_EPISODE_LIMIT = 100
+
+# Shows in the library. Higher than the episode limit because this is a flat
+# list of subscriptions rather than a per-show fetch, and a truncated library
+# is the one thing Music Assistant reads as "you unsubscribed".
+LIBRARY_PODCAST_LIMIT = 9999
+
+# YouTube returns two auto-generated playlists alongside real subscriptions:
+# "New Episodes" (RDPN) and "Saved episodes" (SE). They are not shows, they do
+# not answer to get_podcast, and syncing them into the library would put two
+# permanent pseudo-subscriptions there that the user cannot remove. The official
+# ytmusic provider skips them for the same reason.
+PERSONAL_PODCAST_PLAYLIST_IDS = frozenset({"RDPN", "SE"})
 
 # Shows and episodes change far more slowly than a mix does: a new episode
 # appears weekly at best, and the description and artwork essentially never
@@ -2313,6 +2331,37 @@ class YoutubeMusicFreeProvider(MusicProvider):
             with suppress(InvalidDataError, KeyError, TypeError):
                 item.setdefault("id", item.get("playlistId"))
                 yield self._parse_playlist(item)
+
+    async def get_library_podcasts(self) -> AsyncGenerator[Podcast, None]:
+        """Get the shows the user subscribes to.
+
+        Same guard order as every other library method, and for the same reason:
+        Music Assistant deletes anything a completed sync did not return, so an
+        unauthenticated run has to fail rather than answer "no subscriptions".
+        See issue #55.
+        """
+        if not self._authenticated:
+            await self._require_library_auth("podcasts")
+            return
+        try:
+            results = await asyncio.to_thread(
+                self._ytmusic.get_library_podcasts, limit=LIBRARY_PODCAST_LIMIT
+            ) or []
+        except Exception as err:
+            self._warn_library_error("get_library_podcasts", err)
+            return
+        shows = [
+            obj
+            for obj in results
+            if str(obj.get("podcastId") or "") not in PERSONAL_PODCAST_PLAYLIST_IDS
+        ]
+        # Counted after the auto-playlists are dropped. Counting before would
+        # make a lapsed session look populated on the strength of two entries
+        # YouTube returns whether or not you subscribe to anything.
+        await self._guard_partial_auth_empty("podcasts", len(shows))
+        for obj in shows:
+            with suppress(InvalidDataError, KeyError, TypeError):
+                yield self._parse_podcast(obj)
 
     async def library_add(self, item: MediaItemType) -> bool:
         """Add an item to the user's library."""

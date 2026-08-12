@@ -2732,17 +2732,75 @@ def test_podcast_lookups_are_cached():
         assert args["expiration"] == ytm.PODCAST_CACHE_TTL
 
 
-def test_library_podcasts_is_not_advertised():
-    """Pass one is anonymous, and declaring a library we cannot read is unsafe.
+def test_library_podcasts_is_an_authenticated_feature_only():
+    """Subscribed shows need a cookie, so the feature belongs with the others.
 
-    Music Assistant deletes anything a completed sync did not return, so a
-    LIBRARY_PODCASTS feature with no working implementation behind it is the
-    issue #55 failure mode with a new media type.
+    Declaring it was unsafe while there was no implementation behind it: Music
+    Assistant deletes anything a completed sync did not return, so an empty
+    answer is an instruction to unsubscribe from everything. It is safe now
+    only because get_library_podcasts goes through the same guard as every
+    other library method, which the next test pins.
     """
-    feature = getattr(ytm.ProviderFeature, "LIBRARY_PODCASTS", None)
-    if feature is None:
-        pytest.skip("stub ProviderFeature has no LIBRARY_PODCASTS member")
-    assert feature not in (ytm.BASE_FEATURES | ytm.AUTHENTICATED_FEATURES)
+    feature = ytm.ProviderFeature.LIBRARY_PODCASTS
+    assert feature in ytm.AUTHENTICATED_FEATURES
+    assert feature not in ytm.BASE_FEATURES
+
+
+def test_library_podcasts_fails_rather_than_reporting_no_subscriptions(provider):
+    """The issue #55 guard, applied to the new media type."""
+    provider._authenticated = False
+    provider._auth_lapse_warned = False
+    _cookie_configured(provider)
+
+    with pytest.raises(RuntimeError, match="not active"):
+        _consume(provider.get_library_podcasts())
+
+
+def test_library_podcasts_skips_the_auto_generated_playlists(provider):
+    """"New Episodes" and "Saved episodes" are not shows.
+
+    YouTube returns them alongside real subscriptions. Syncing them would put
+    two permanent pseudo-subscriptions in the library that cannot be removed.
+    """
+    provider._authenticated = True
+    mock = MagicMock()
+    mock.get_library_podcasts.return_value = [
+        {"title": "New Episodes", "podcastId": "RDPN", "channel": {"id": None, "name": "Auto playlist"}},
+        {"title": "Saved episodes", "podcastId": "SE", "channel": {"id": None, "name": "Auto playlist"}},
+        {
+            "title": "A Real Show",
+            "podcastId": "PLabc123",
+            "browseId": "MPSPPLabc123",
+            "channel": {"id": "UCxyz", "name": "A Publisher"},
+        },
+    ]
+    provider._ytmusic = mock
+
+    shows = _consume(provider.get_library_podcasts())
+
+    assert [s.item_id for s in shows] == ["PLabc123"]
+    assert shows[0].publisher == "A Publisher"
+
+
+def test_library_podcasts_counts_real_shows_for_the_empty_guard(provider):
+    """The auto-playlists must not make a lapsed session look populated.
+
+    YouTube returns them whether or not you subscribe to anything, so counting
+    before filtering would mask exactly the empty sync the guard exists to
+    catch.
+    """
+    provider._authenticated = True
+    provider._auth_lapse_warned = False
+    mock = MagicMock()
+    mock.get_library_podcasts.return_value = [
+        {"title": "New Episodes", "podcastId": "RDPN"},
+        {"title": "Saved episodes", "podcastId": "SE"},
+    ]
+    mock.get_account_info = MagicMock(return_value={})  # logged-out shape
+    provider._ytmusic = mock
+
+    with pytest.raises(RuntimeError, match="cookie lapse"):
+        _consume(provider.get_library_podcasts())
 
 
 def test_get_album_raises_when_not_found(provider):
