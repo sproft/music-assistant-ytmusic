@@ -59,12 +59,38 @@ services:
     # ... keep your existing volumes, network, devices, and ports settings here
 ```
 
+### Available Docker tags
+
+Official releases and automatic builds use **strictly separated tags**. This separation exists because the plugin is built on top of a moving upstream base image (`ghcr.io/music-assistant/server`): a change in that base image can break the plugin at any time. Only official releases, created by pushing a git tag in this repository, are tested - automatic builds are rebuilt whenever the base image changes and are therefore **untested**.
+
+#### Official releases (tested)
+
+Built **only** when a git tag (`v*` or `X.Y.Z*`) is pushed to this repository. Base image: `ghcr.io/music-assistant/server:latest`.
+
+| Tag | Description |
+| --- | --- |
+| `:<version>` (e.g. `:2.1.0`) | The tested release image, pinned to the git tag (without the `v` prefix). |
+| `:latest` | Moving tag pointing at the most recent tested release. **Recommended for production.** |
+
+#### Automatic builds (untested)
+
+Rebuilt automatically (daily schedule and on pushes to `main`) whenever the upstream base image changes. A base-image update can break the plugin at any time - use at your own risk.
+
+| Tag | Base image | Description |
+| --- | --- | --- |
+| `:edge` | `ghcr.io/music-assistant/server:latest` | Rolling build for stable Music Assistant releases. **Untested.** |
+| `:beta` | `ghcr.io/music-assistant/server:beta` | Rolling build for MA beta pre-releases (`2.X.0b*`/rc). **Untested.** |
+| `:nightly` | `ghcr.io/music-assistant/server:nightly` | Rolling build for MA nightly dev builds (`2.X.0.dev*`). **Untested.** |
+| `:edge-YYYYMMDD-<shortsha>`, `:beta-YYYYMMDD-<shortsha>`, `:nightly-YYYYMMDD-<shortsha>` (e.g. `:edge-20260831-a1b2c3d`) | — | Immutable companion tags for rollback, one per build (build date + commit short SHA). |
+
 > [!NOTE]
-> The `:latest` and `:beta` tags are rolling builds synced with the upstream server releases.
+> The `:latest` tag is reserved for official, tested releases and is never touched by automatic builds. If you want to live dangerously and track automatic builds, use `:edge` instead.
 >
 > The image was previously published as `ghcr.io/sproft/music-assistant-ytmusic`. That name is retired: existing tags stay pullable so running deployments keep working, but new builds are published only under the name above, so switch your compose file when convenient.
 >
-> For reproducible deployments, pin to a specific build. The `:latest-<run_id>` / `:beta-<run_id>` tags identify a single build and are stable in normal use, but a manual workflow re-run reuses the run id and can republish different bits under the same tag. For a guaranteed-immutable pin, use the `@sha256:` digest.
+> For reproducible deployments, pin to an immutable tag such as `:<version>`, `:edge-YYYYMMDD-<shortsha>`, or a specific `@sha256:` digest.
+>
+> The daily build checks the base image digest and the stamped commit revision; variants are only rebuilt when the base image changed or a previous build was missed. For the `beta`/`nightly` variants the provider code can optionally be pulled from a different plugin branch (e.g. `dev` or `beta`) via the `plugin_ref` input of the *Build and Publish Docker Images* workflow.
 
 ## Installation: Home Assistant OS
 
